@@ -30,6 +30,7 @@ if not exist "%ISO_DIR%" mkdir "%ISO_DIR%"
 if not exist "%ISO_DIR%\boot\limine" mkdir "%ISO_DIR%\boot\limine"
 if not exist "%ISO_DIR%\EFI\BOOT" mkdir "%ISO_DIR%\EFI\BOOT"
 if not exist "%ISO_DIR%\limine" mkdir "%ISO_DIR%\limine"
+if not exist "%ISO_DIR%\assets" mkdir "%ISO_DIR%\assets"
 
 REM ---- Compile kernel ----
 "%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel -I "%LIMINE_DIR%" -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
@@ -58,6 +59,10 @@ copy /Y "%LIMINE_DIR%\limine-bios.sys" "%ISO_DIR%\limine\" >nul
 copy /Y "%LIMINE_DIR%\limine-bios-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\limine-uefi-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\BOOTX64.EFI" "%ISO_DIR%\EFI\BOOT\" >nul
+REM Download Inter font (for future use) if missing
+if not exist "%ISO_DIR%\assets\Inter.ttf" (
+    powershell -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip' -OutFile 'inter.zip'; Add-Type -A 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::ExtractToDirectory('inter.zip','inter_tmp'); Copy-Item -Path inter_tmp\*.ttf -Destination '%ISO_DIR%\assets\' -ErrorAction SilentlyContinue; Remove-Item inter.zip -Force; Remove-Item inter_tmp -Recurse -Force } catch { }"
+)
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\limine.conf" >nul
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\LIMINE.CONF" >nul
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\limine.cfg" >nul
