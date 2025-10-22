@@ -41,7 +41,7 @@ static void hcf(void) { asm ("cli"); for (;;) asm ("hlt"); }
 
 // ----------------- Simple heap for stb_image -----------------
 typedef struct { size_t size; } blk_header;
-static unsigned char STBI_HEAP[2 * 1024 * 1024]; // 2 MiB arena for image decode
+static unsigned char STBI_HEAP[32 * 1024 * 1024]; // 32 MiB arena for image decode
 static size_t STBI_OFF = 0;
 static void *kmalloc(size_t sz) {
 	// allocate with header storing size for naive realloc
@@ -131,11 +131,11 @@ static void blit_rgba_center(struct limine_framebuffer *fb, const uint8_t *rgba,
 
 // ----------------- Limine modules -----------------
 typedef struct {
-	const unsigned char *data;
-	size_t size;
+    const unsigned char *data;
+    size_t size;
 } file_view;
 
-static const file_view find_module_by_suffix(const char *suffix) {
+static file_view find_module_by_suffix(const char *suffix) {
 	const struct limine_module_response *resp = module_request.response;
 	if (!resp) return (file_view){0};
 	for (uint64_t i = 0; i < resp->module_count; i++) {
@@ -151,6 +151,9 @@ static const file_view find_module_by_suffix(const char *suffix) {
 }
 
 // ----------------- GIF helpers -----------------
+// Forward decl for fallback delay used in gif_load_from_module
+static void busy_sleep_ms(uint32_t ms);
+
 typedef struct {
 	unsigned char *frames; // RGBA interleaved frames, size: w*h*4*count
 	int *delays_ms;        // length = count
@@ -160,13 +163,18 @@ typedef struct {
 static int gif_load_from_module(const char *suffix, gif_image *out) {
 	*out = (gif_image){0};
 	file_view v = find_module_by_suffix(suffix);
-	if (!v.data || v.size == 0) return 0;
+    if (!v.data || v.size == 0) return 0;
 	int comp = 4;
 	int x = 0, y = 0, z = 0;
 	int *delays = NULL;
 	unsigned char *frames = stbi_load_gif_from_memory((const unsigned char *)v.data, (int)v.size,
 							    &delays, &x, &y, &z, &comp, 4);
-	if (!frames || x <= 0 || y <= 0 || z <= 0) return 0;
+    if (!frames || x <= 0 || y <= 0 || z <= 0) {
+        // Fallback: fill screen with color to indicate failure
+        clear_fb(framebuffer_request.response->framebuffers[0], 0x40, 0x00, 0x00);
+        busy_sleep_ms(300);
+        return 0;
+    }
 	out->frames = frames;
 	out->delays_ms = delays;
 	out->w = x;
@@ -176,8 +184,8 @@ static int gif_load_from_module(const char *suffix, gif_image *out) {
 }
 
 static void busy_sleep_ms(uint32_t ms) {
-	// crude busy-wait; timing varies by CPU speed
-	volatile uint64_t spins = (uint64_t)ms * 50000ull;
+    // crude busy-wait; timing varies by CPU speed; bump factor for visibility in QEMU
+    volatile uint64_t spins = (uint64_t)ms * 250000ull;
 	for (uint64_t i = 0; i < spins; i++) {
 		__asm__ __volatile__("" ::: "memory");
 	}
@@ -214,23 +222,27 @@ void _start(void) {
 	gif_load_from_module("/assets/loader/stage2.gif", &g2);
 	gif_load_from_module("/assets/loader/stage3.gif", &g3);
 
-	// Stage 1: play once if present
-	if (g1.frames) play_gif_once(fb, &g1);
+    // Stage 1: play once if present and keep on screen a moment
+    if (g1.frames) { play_gif_once(fb, &g1); busy_sleep_ms(1500u); }
 
-	// Stage 2: animer pendant l'initialisation réelle (actuellement instantanée)
-	if (g2.frames) {
-		int idx = 0;
-		while (!boot_init_step()) {
-			const uint8_t *frame = g2.frames + (size_t)g2.w * (size_t)g2.h * 4u * (size_t)idx;
-			blit_rgba_center(fb, frame, g2.w, g2.h);
-			int d = (g2.delays_ms && g2.delays_ms[idx] > 0) ? g2.delays_ms[idx] : 33;
-			busy_sleep_ms((uint32_t)d);
-			idx = (idx + 1) % (g2.count > 0 ? g2.count : 1);
-		}
-	}
+    // Stage 2: animate during init; if init is instant, still show ~2s
+    if (g2.frames) {
+        int idx = 0;
+        uint32_t shown = 0;
+        int init_done = boot_init_step();
+        while (!init_done || shown < 3500u) {
+            const uint8_t *frame = g2.frames + (size_t)g2.w * (size_t)g2.h * 4u * (size_t)idx;
+            blit_rgba_center(fb, frame, g2.w, g2.h);
+            int d = (g2.delays_ms && g2.delays_ms[idx] > 0) ? g2.delays_ms[idx] : 33;
+            busy_sleep_ms((uint32_t)d);
+            shown += (uint32_t)d;
+            idx = (idx + 1) % (g2.count > 0 ? g2.count : 1);
+            if (!init_done) init_done = boot_init_step();
+        }
+    }
 
-	// Stage 3: final image/animation once
-	if (g3.frames) play_gif_once(fb, &g3);
+    // Stage 3: final image/animation once, keep visible
+    if (g3.frames) { play_gif_once(fb, &g3); busy_sleep_ms(4000u); }
 
 	hcf();
 }
