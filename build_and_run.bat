@@ -15,6 +15,7 @@ set LIMINE_DIR=Limine
 set STB_DIR=kernel\stb
 set INC_DIR=kernel\include
 set BITS_DIR=kernel\include\bits
+set LOADER_DIR=kernel\loader
 
 REM ---- Tools (require LLVM, xorriso, QEMU in PATH) ----
 set CC=clang
@@ -34,17 +35,18 @@ if not exist "%ISO_DIR%\boot\limine" mkdir "%ISO_DIR%\boot\limine"
 if not exist "%ISO_DIR%\EFI\BOOT" mkdir "%ISO_DIR%\EFI\BOOT"
 if not exist "%ISO_DIR%\limine" mkdir "%ISO_DIR%\limine"
 if not exist "%ISO_DIR%\assets" mkdir "%ISO_DIR%\assets"
+if not exist "%ISO_DIR%\assets\loader" mkdir "%ISO_DIR%\assets\loader"
 if not exist "kernel" mkdir "kernel"
 if not exist "%INC_DIR%" mkdir "%INC_DIR%"
 if not exist "%BITS_DIR%" mkdir "%BITS_DIR%"
 
-REM ===== STB headers: local-only (no auto-download) =====
-if not exist "kernel\stb_truetype.h" (
-  echo [!] Missing required header: kernel\stb_truetype.h
-  echo     Place a local copy of stb_truetype.h and re-run.
+REM ===== stb_image header: local-only (no auto-download) =====
+if not exist "kernel\stb_image.h" (
+  echo [!] Missing required header: kernel\stb_image.h
+  echo     Place a local copy of stb_image.h and re-run.
   exit /b 1
 ) else (
-  echo [=] Using local stb_truetype.h
+  echo [=] Using local stb_image.h
 )
 
 REM ===== C headers: local-only (no auto-download) =====
@@ -89,8 +91,10 @@ copy /Y "%LIMINE_DIR%\limine-bios-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\limine-uefi-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\BOOTX64.EFI" "%ISO_DIR%\EFI\BOOT\" >nul
 
-REM Optional font: copy local assets\Inter.ttf if present (no download)
-if exist "assets\Inter.ttf" copy /Y "assets\Inter.ttf" "%ISO_DIR%\assets\Inter.ttf" >nul
+REM Copy GIF loader assets if present
+if exist "%LOADER_DIR%\stage1.gif" copy /Y "%LOADER_DIR%\stage1.gif" "%ISO_DIR%\assets\loader\stage1.gif" >nul
+if exist "%LOADER_DIR%\stage2.gif" copy /Y "%LOADER_DIR%\stage2.gif" "%ISO_DIR%\assets\loader\stage2.gif" >nul
+if exist "%LOADER_DIR%\stage3.gif" copy /Y "%LOADER_DIR%\stage3.gif" "%ISO_DIR%\assets\loader\stage3.gif" >nul
 
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\limine.conf" >nul
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\LIMINE.CONF" >nul

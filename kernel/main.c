@@ -1,5 +1,4 @@
-// Nova OS — Inter TTF rendering via stb_truetype + Limine module
-// Freestanding, no libm, custom allocators (arena)
+// Nova OS — Boot stages with animated GIFs via Limine modules
 
 #include <stdint.h>
 #include <stddef.h>
@@ -7,247 +6,228 @@
 
 // ----------------- Limine requests -----------------
 static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST,
-    .revision = 0
+	.id = LIMINE_FRAMEBUFFER_REQUEST,
+	.revision = 0
 };
 
 static volatile struct limine_module_request module_request = {
-    .id = LIMINE_MODULE_REQUEST,
-    .revision = 0
+	.id = LIMINE_MODULE_REQUEST,
+	.revision = 0
 };
 
 // ----------------- libc minis -----------------
 void *memcpy(void *dest, const void *src, size_t n) {
-    uint8_t *d = (uint8_t *)dest; const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < n; i++) d[i] = s[i];
-    return dest;
+	uint8_t *d = (uint8_t *)dest; const uint8_t *s = (const uint8_t *)src;
+	for (size_t i = 0; i < n; i++) d[i] = s[i];
+	return dest;
 }
 void *memset(void *s, int c, size_t n) {
-    uint8_t *p = (uint8_t *)s; for (size_t i = 0; i < n; i++) p[i] = (uint8_t)c; return s;
+	uint8_t *p = (uint8_t *)s; for (size_t i = 0; i < n; i++) p[i] = (uint8_t)c; return s;
 }
 void *memmove(void *dest, const void *src, size_t n) {
-    uint8_t *d = (uint8_t *)dest; const uint8_t *s = (const uint8_t *)src;
-    if (s > d) for (size_t i = 0; i < n; i++) d[i] = s[i];
-    else if (s < d) for (size_t i = n; i > 0; i--) d[i-1] = s[i-1];
-    return dest;
+	uint8_t *d = (uint8_t *)dest; const uint8_t *s = (const uint8_t *)src;
+	if (s > d) for (size_t i = 0; i < n; i++) d[i] = s[i];
+	else if (s < d) for (size_t i = n; i > 0; i--) d[i-1] = s[i-1];
+	return dest;
 }
 int memcmp(const void *s1, const void *s2, size_t n) {
-    const uint8_t *a = (const uint8_t *)s1, *b = (const uint8_t *)s2;
-    for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
-    return 0;
+	const uint8_t *a = (const uint8_t *)s1, *b = (const uint8_t *)s2;
+	for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+	return 0;
 }
 
 // ----------------- Halt -----------------
 static void hcf(void) { asm ("cli"); for (;;) asm ("hlt"); }
 
+// ----------------- Simple heap for stb_image -----------------
+typedef struct { size_t size; } blk_header;
+static unsigned char STBI_HEAP[2 * 1024 * 1024]; // 2 MiB arena for image decode
+static size_t STBI_OFF = 0;
+static void *kmalloc(size_t sz) {
+	// allocate with header storing size for naive realloc
+	sz = (sz + 7) & ~((size_t)7);
+	if (sz > (sizeof(STBI_HEAP) - STBI_OFF - sizeof(blk_header))) return NULL;
+	blk_header *h = (blk_header *)(STBI_HEAP + STBI_OFF);
+	STBI_OFF += sizeof(blk_header);
+	h->size = sz;
+	void *p = (void *)(STBI_HEAP + STBI_OFF);
+	STBI_OFF += sz;
+	return p;
+}
+static void *krealloc(void *p, size_t new_sz) {
+	if (!p) return kmalloc(new_sz);
+	// naive: allocate new and memcpy min(old, new)
+	blk_header *h = (blk_header *)((uint8_t *)p - sizeof(blk_header));
+	void *np = kmalloc(new_sz);
+	if (!np) return NULL;
+	size_t copy = h->size < new_sz ? h->size : new_sz;
+	memcpy(np, p, copy);
+	return np;
+}
+static void kfree(void *p) { (void)p; }
+
+// ----------------- stb_image (GIF only) -----------------
+#define STBI_NO_STDIO
+#define STBI_ONLY_GIF
+#define STBI_MALLOC(sz) kmalloc(sz)
+#define STBI_REALLOC(p,nsz) krealloc((p),(nsz))
+#define STBI_FREE(p) kfree(p)
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // ----------------- FB helpers -----------------
 static inline uint32_t fb_pack_rgb(struct limine_framebuffer *fb,
-                                   uint8_t r, uint8_t g, uint8_t b) {
-    uint32_t r_mask = (fb->red_mask_size   >= 8) ? (uint32_t)r : ((uint32_t)r >> (8 - fb->red_mask_size));
-    uint32_t g_mask = (fb->green_mask_size >= 8) ? (uint32_t)g : ((uint32_t)g >> (8 - fb->green_mask_size));
-    uint32_t b_mask = (fb->blue_mask_size  >= 8) ? (uint32_t)b : ((uint32_t)b >> (8 - fb->blue_mask_size));
-    r_mask &= (fb->red_mask_size   == 32 ? 0xFFFFFFFFu : ((1u << fb->red_mask_size)   - 1u));
-    g_mask &= (fb->green_mask_size == 32 ? 0xFFFFFFFFu : ((1u << fb->green_mask_size) - 1u));
-    b_mask &= (fb->blue_mask_size  == 32 ? 0xFFFFFFFFu : ((1u << fb->blue_mask_size)  - 1u));
-    return (r_mask << fb->red_mask_shift) |
-           (g_mask << fb->green_mask_shift) |
-           (b_mask << fb->blue_mask_shift);
+				   uint8_t r, uint8_t g, uint8_t b) {
+	uint32_t r_mask = (fb->red_mask_size   >= 8) ? (uint32_t)r : ((uint32_t)r >> (8 - fb->red_mask_size));
+	uint32_t g_mask = (fb->green_mask_size >= 8) ? (uint32_t)g : ((uint32_t)g >> (8 - fb->green_mask_size));
+	uint32_t b_mask = (fb->blue_mask_size  >= 8) ? (uint32_t)b : ((uint32_t)b >> (8 - fb->blue_mask_size));
+	r_mask &= (fb->red_mask_size   == 32 ? 0xFFFFFFFFu : ((1u << fb->red_mask_size)   - 1u));
+	g_mask &= (fb->green_mask_size == 32 ? 0xFFFFFFFFu : ((1u << fb->green_mask_size) - 1u));
+	b_mask &= (fb->blue_mask_size  == 32 ? 0xFFFFFFFFu : ((1u << fb->blue_mask_size)  - 1u));
+	return (r_mask << fb->red_mask_shift) |
+	       (g_mask << fb->green_mask_shift) |
+	       (b_mask << fb->blue_mask_shift);
 }
 
 static inline void put_px(struct limine_framebuffer *fb, uint64_t x, uint64_t y, uint32_t c) {
-    if (x >= fb->width || y >= fb->height) return;
-    ((uint32_t *)fb->address)[(fb->pitch/4) * y + x] = c;
+	if (x >= fb->width || y >= fb->height) return;
+	((uint32_t *)fb->address)[(fb->pitch/4) * y + x] = c;
 }
 
-static void blit_alpha_glyph_u8(struct limine_framebuffer *fb,
-                                int64_t dst_x, int64_t dst_y,
-                                const unsigned char *g, int gw, int gh,
-                                uint32_t color) {
-    if (!g || gw <= 0 || gh <= 0) return;
-    uint8_t r = (uint8_t)((color >> fb->red_mask_shift)   & 0xFF);
-    uint8_t gch = (uint8_t)((color >> fb->green_mask_shift) & 0xFF);
-    uint8_t b = (uint8_t)((color >> fb->blue_mask_shift)  & 0xFF);
-    for (int y = 0; y < gh; y++) {
-        int64_t py = dst_y + y;
-        if (py < 0 || (uint64_t)py >= fb->height) continue;
-        for (int x = 0; x < gw; x++) {
-            int64_t px = dst_x + x;
-            if (px < 0 || (uint64_t)px >= fb->width) continue;
-            uint8_t a = g[y*gw + x]; // 0..255
-            if (!a) continue;
-
-            // Simple src-over on opaque bg: just set premultiplied-ish
-            // If tu veux un blending correct, lis le pixel, fais lerp.
-            uint32_t out =
-                ((uint32_t)r << fb->red_mask_shift) |
-                ((uint32_t)gch << fb->green_mask_shift) |
-                ((uint32_t)b << fb->blue_mask_shift);
-            put_px(fb, (uint64_t)px, (uint64_t)py, out);
-        }
-    }
+static void clear_fb(struct limine_framebuffer *fb, uint8_t r, uint8_t g, uint8_t b) {
+	uint32_t c = fb_pack_rgb(fb, r, g, b);
+	for (uint64_t y = 0; y < fb->height; y++) {
+		uint32_t *row = (uint32_t *)((uint8_t *)fb->address + y * fb->pitch);
+		for (uint64_t x = 0; x < fb->width; x++) row[x] = c;
+	}
 }
 
-// ----------------- Tiny arena for stb (no malloc) -----------------
-static unsigned char TT_ARENA[1024 * 1024]; // 1 MiB (suffisant pour "NOVA OS")
-static size_t TT_OFF = 0;
-static void *tt_alloc(size_t sz, void *ud) {
-    (void)ud;
-    sz = (sz + 7) & ~((size_t)7);
-    if (TT_OFF + sz > sizeof(TT_ARENA)) return NULL;
-    void *p = &TT_ARENA[TT_OFF];
-    TT_OFF += sz;
-    return p;
+static void blit_rgba_center(struct limine_framebuffer *fb, const uint8_t *rgba,
+			       int w, int h) {
+	if (!rgba || w <= 0 || h <= 0) return;
+	// center
+	int dst_x = 0;
+	int dst_y = 0;
+	if ((uint64_t)w < fb->width) dst_x = (int)((fb->width - (uint64_t)w) / 2);
+	if ((uint64_t)h < fb->height) dst_y = (int)((fb->height - (uint64_t)h) / 2);
+	for (int y = 0; y < h; y++) {
+		int64_t py = (int64_t)dst_y + y;
+		if (py < 0 || (uint64_t)py >= fb->height) continue;
+		const uint8_t *src = rgba + (size_t)y * (size_t)w * 4u;
+		for (int x = 0; x < w; x++) {
+			int64_t px = (int64_t)dst_x + x;
+			if (px < 0 || (uint64_t)px >= fb->width) continue;
+			uint8_t R = src[4u * (size_t)x + 0];
+			uint8_t G = src[4u * (size_t)x + 1];
+			uint8_t B = src[4u * (size_t)x + 2];
+			// ignore alpha for now (opaque blit)
+			put_px(fb, (uint64_t)px, (uint64_t)py, fb_pack_rgb(fb, R, G, B));
+		}
+	}
 }
-static void tt_free(void *p, void *ud) { (void)p; (void)ud; }
 
-// ----------------- stb_truetype -----------------
-#define STBTT_STATIC
-#define STBTT_malloc(x,u) tt_alloc((x),(u))
-#define STBTT_free(x,u)   tt_free((x),(u))
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "stb_truetype.h"
-
-// ----------------- Font utils -----------------
+// ----------------- Limine modules -----------------
 typedef struct {
-    const unsigned char *data;
-    size_t size;
+	const unsigned char *data;
+	size_t size;
 } file_view;
 
 static const file_view find_module_by_suffix(const char *suffix) {
-    const struct limine_module_response *resp = module_request.response;
-    if (!resp) return (file_view){0};
-    for (uint64_t i = 0; i < resp->module_count; i++) {
-        struct limine_file *f = resp->modules[i];
-        if (!f || !f->path) continue;
-        // match fin de chemin (…/assets/Inter.ttf)
-        const char *p = f->path;
-        // cherche suffix à la fin
-        size_t j = 0; while (suffix[j]) j++;
-        size_t k = 0; while (p[k]) k++;
-        while (j && k && suffix[j-1] == p[k-1]) { j--; k--; }
-        if (j == 0) {
-            return (file_view){ (const unsigned char *)f->address, (size_t)f->size };
-        }
-    }
-    return (file_view){0};
+	const struct limine_module_response *resp = module_request.response;
+	if (!resp) return (file_view){0};
+	for (uint64_t i = 0; i < resp->module_count; i++) {
+		struct limine_file *f = resp->modules[i];
+		if (!f || !f->path) continue;
+		const char *p = f->path;
+		size_t j = 0; while (suffix[j]) j++;
+		size_t k = 0; while (p[k]) k++;
+		while (j && k && suffix[j-1] == p[k-1]) { j--; k--; }
+		if (j == 0) return (file_view){ (const unsigned char *)f->address, (size_t)f->size };
+	}
+	return (file_view){0};
 }
 
-static int is_space(char c) { return c == ' '; }
+// ----------------- GIF helpers -----------------
+typedef struct {
+	unsigned char *frames; // RGBA interleaved frames, size: w*h*4*count
+	int *delays_ms;        // length = count
+	int w, h, count;
+} gif_image;
 
-// ----------------- Text drawing using Inter.ttf -----------------
-static void draw_text_inter_ttf(struct limine_framebuffer *fb,
-                                uint64_t x, uint64_t y,
-                                const char *text,
-                                float pixel_height,
-                                uint32_t color,
-                                int letter_spacing_px) {
-    // Récupère Inter.ttf passé en module Limine
-    file_view inter = find_module_by_suffix("/assets/Inter.ttf");
-    if (!inter.data || inter.size == 0) return;
-
-    // Init stb font
-    stbtt_fontinfo font;
-    if (!stbtt_InitFont(&font, inter.data, stbtt_GetFontOffsetForIndex(inter.data, 0))) return;
-
-    float scale = stbtt_ScaleForPixelHeight(&font, pixel_height);
-
-    int ascent, descent, lineGap;
-    stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
-    int baseline = (int)(ascent * scale);
-
-    int pen_x = (int)x;
-    int pen_y = (int)y + baseline;
-
-    for (const char *p = text; *p; p++) {
-        unsigned int code = (unsigned char)*p;
-        if (is_space((char)code)) {
-            // espace: avance arbitraire ~ 0.5em
-            int ax, lsb;
-            stbtt_GetCodepointHMetrics(&font, 'n', &ax, &lsb);
-            pen_x += (int)(ax * scale * 0.5f) + letter_spacing_px;
-            continue;
-        }
-
-        int ax, lsb;
-        stbtt_GetCodepointHMetrics(&font, (int)code, &ax, &lsb);
-
-        int x0, y0, x1, y1;
-        stbtt_GetCodepointBitmapBox(&font, (int)code, scale, scale, &x0, &y0, &x1, &y1);
-
-        int gw = x1 - x0;
-        int gh = y1 - y0;
-        if (gw > 0 && gh > 0) {
-            // raster directement dans un buffer fourni
-            unsigned char *bmp = (unsigned char *)tt_alloc((size_t)gw * (size_t)gh, NULL);
-            if (bmp) {
-                memset(bmp, 0, (size_t)gw * (size_t)gh);
-                stbtt_MakeCodepointBitmap(&font, bmp, gw, gh, gw, scale, scale, (int)code);
-
-                int gx = pen_x + (int)(lsb * scale) + x0;
-                int gy = pen_y + y0;
-                blit_alpha_glyph_u8(fb, gx, gy, bmp, gw, gh, color);
-            }
-        }
-
-        // Avance + kerning + espacement
-        pen_x += (int)(ax * scale);
-        if (p[1]) pen_x += (int)(stbtt_GetCodepointKernAdvance(&font, (int)code, (int)(unsigned char)p[1]) * scale);
-        pen_x += letter_spacing_px;
-    }
+static int gif_load_from_module(const char *suffix, gif_image *out) {
+	*out = (gif_image){0};
+	file_view v = find_module_by_suffix(suffix);
+	if (!v.data || v.size == 0) return 0;
+	int comp = 4;
+	int x = 0, y = 0, z = 0;
+	int *delays = NULL;
+	unsigned char *frames = stbi_load_gif_from_memory((const unsigned char *)v.data, (int)v.size,
+							    &delays, &x, &y, &z, &comp, 4);
+	if (!frames || x <= 0 || y <= 0 || z <= 0) return 0;
+	out->frames = frames;
+	out->delays_ms = delays;
+	out->w = x;
+	out->h = y;
+	out->count = z;
+	return 1;
 }
 
-// Mesure largeur (approx) pour centrer
-static uint64_t measure_text_inter_ttf(const unsigned char *data, size_t size,
-                                       const char *text, float pixel_height, int letter_spacing_px) {
-    stbtt_fontinfo font;
-    if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) return 0;
+static void busy_sleep_ms(uint32_t ms) {
+	// crude busy-wait; timing varies by CPU speed
+	volatile uint64_t spins = (uint64_t)ms * 50000ull;
+	for (uint64_t i = 0; i < spins; i++) {
+		__asm__ __volatile__("" ::: "memory");
+	}
+}
 
-    float scale = stbtt_ScaleForPixelHeight(&font, pixel_height);
-    int width = 0;
-    for (const char *p = text; *p; p++) {
-        if (is_space(*p)) { // espace ~ 0.5em
-            int ax, lsb;
-            stbtt_GetCodepointHMetrics(&font, 'n', &ax, &lsb);
-            width += (int)(ax * scale * 0.5f) + letter_spacing_px;
-            continue;
-        }
-        int ax, lsb;
-        stbtt_GetCodepointHMetrics(&font, (int)(unsigned char)*p, &ax, &lsb);
-        width += (int)(ax * scale) + letter_spacing_px;
-        if (p[1]) width += (int)(stbtt_GetCodepointKernAdvance(&font, (int)(unsigned char)p[0], (int)(unsigned char)p[1]) * scale);
-    }
-    if (width < 0) width = 0;
-    return (uint64_t)width;
+static void play_gif_once(struct limine_framebuffer *fb, const gif_image *g) {
+	if (!g || !g->frames || g->w <= 0 || g->h <= 0 || g->count <= 0) return;
+	for (int i = 0; i < g->count; i++) {
+		const uint8_t *frame = g->frames + (size_t)g->w * (size_t)g->h * 4u * (size_t)i;
+		blit_rgba_center(fb, frame, g->w, g->h);
+		int d = (g->delays_ms && g->delays_ms[i] > 0) ? g->delays_ms[i] : 33;
+		busy_sleep_ms((uint32_t)d);
+	}
+}
+
+static int boot_init_step(void) {
+	// Réaliste: effectuer ici les initialisations noyau/services.
+	// Actuellement, aucune initialisation longue n'est nécessaire.
+	return 1; // déjà prêt
 }
 
 // ----------------- Entry -----------------
 void _start(void) {
-    if (framebuffer_request.response == NULL
-     || framebuffer_request.response->framebuffer_count < 1) {
-        hcf();
-    }
+	if (framebuffer_request.response == NULL
+	 || framebuffer_request.response->framebuffer_count < 1) {
+		hcf();
+	}
 
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+	struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+	clear_fb(fb, 0x00, 0x00, 0x00);
 
-    const char *title = "NOVA OS";
+	gif_image g1, g2, g3;
+	gif_load_from_module("/assets/loader/stage1.gif", &g1);
+	gif_load_from_module("/assets/loader/stage2.gif", &g2);
+	gif_load_from_module("/assets/loader/stage3.gif", &g3);
 
-    // Taille “Inter” : hauteur de capes ~ 14*scale pixels. Ici on vise ~100 px.
-    float pixel_height = 98.0f;     // ajuste à ton goût
-    int letter_spacing = 2;         // px supplémentaires
+	// Stage 1: play once if present
+	if (g1.frames) play_gif_once(fb, &g1);
 
-    // Couleur (blanc)
-    uint32_t white = fb_pack_rgb(fb, 0xFF, 0xFF, 0xFF);
+	// Stage 2: animer pendant l'initialisation réelle (actuellement instantanée)
+	if (g2.frames) {
+		int idx = 0;
+		while (!boot_init_step()) {
+			const uint8_t *frame = g2.frames + (size_t)g2.w * (size_t)g2.h * 4u * (size_t)idx;
+			blit_rgba_center(fb, frame, g2.w, g2.h);
+			int d = (g2.delays_ms && g2.delays_ms[idx] > 0) ? g2.delays_ms[idx] : 33;
+			busy_sleep_ms((uint32_t)d);
+			idx = (idx + 1) % (g2.count > 0 ? g2.count : 1);
+		}
+	}
 
-    // Mesure pour centrage
-    file_view inter = find_module_by_suffix("/assets/Inter.ttf");
-    uint64_t text_w = inter.data ? measure_text_inter_ttf(inter.data, inter.size, title, pixel_height, letter_spacing) : 0;
-    uint64_t text_h = (uint64_t)(pixel_height); // assez proche
+	// Stage 3: final image/animation once
+	if (g3.frames) play_gif_once(fb, &g3);
 
-    uint64_t x = (fb->width  > text_w) ? (fb->width  - text_w) / 2 : 0;
-    uint64_t y = (fb->height > text_h) ? (fb->height - text_h) / 2 : 0;
-
-    // Render
-    draw_text_inter_ttf(fb, x, y, title, pixel_height, white, letter_spacing);
-
-    hcf();
+	hcf();
 }
