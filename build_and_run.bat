@@ -38,69 +38,29 @@ if not exist "kernel" mkdir "kernel"
 if not exist "%INC_DIR%" mkdir "%INC_DIR%"
 if not exist "%BITS_DIR%" mkdir "%BITS_DIR%"
 
-REM ===== FETCH: full stb repo (Git first, then ZIP fallback) =====
-if not exist "%STB_DIR%" (
-  echo [+] Fetching nothings/stb (full repo)
-  set GITEXE=
-  if exist "%ProgramFiles%\Git\cmd\git.exe" set "GITEXE=%ProgramFiles%\Git\cmd\git.exe"
-  if exist "%ProgramFiles(x86)%\Git\cmd\git.exe" set "GITEXE=%ProgramFiles(x86)%\Git\cmd\git.exe"
-  if exist "%SystemRoot%\System32\git.exe" set "GITEXE=%SystemRoot%\System32\git.exe"
-  if defined GITEXE (
-    "%GITEXE%" clone --depth=1 https://github.com/nothings/stb.git "%STB_DIR%"
-    if errorlevel 1 (
-      echo [!] Git clone failed, trying ZIP fallback
-      set "GITEXE="
-    )
-  )
-  if not defined GITEXE (
-    powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/nothings/stb/archive/refs/heads/master.zip' -OutFile 'stb.zip'; Add-Type -A 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::ExtractToDirectory('stb.zip','kernel'); if (Test-Path 'kernel\stb-master'){ Rename-Item 'kernel\stb-master' 'kernel\stb' -Force; } Remove-Item 'stb.zip' -Force } catch { exit 1 }"
-    if errorlevel 1 ( echo [!] Failed to download stb repo & exit /b 1 )
-  )
+REM ===== STB headers: local-only (no auto-download) =====
+if not exist "kernel\stb_truetype.h" (
+  echo [!] Missing required header: kernel\stb_truetype.h
+  echo     Place a local copy of stb_truetype.h and re-run.
+  exit /b 1
 ) else (
-  echo [=] stb repo already present, skip download.
+  echo [=] Using local stb_truetype.h
 )
 
-REM ===== FETCH: musl headers (include + bits for x86_64) =====
-echo [+] Fetching musl headers (C base + bits/x86_64)
-powershell -NoProfile -Command ^
-  "$ErrorActionPreference='Stop';" ^
-  "$files=@(" ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/assert.h'     ; p='%INC_DIR%\assert.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/string.h'     ; p='%INC_DIR%\string.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/math.h'       ; p='%INC_DIR%\math.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/features.h'   ; p='%INC_DIR%\features.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/stddef.h'     ; p='%INC_DIR%\stddef.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/stdint.h'     ; p='%INC_DIR%\stdint.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/limits.h'     ; p='%INC_DIR%\limits.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/stdbool.h'    ; p='%INC_DIR%\stdbool.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/stdarg.h'     ; p='%INC_DIR%\stdarg.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/ctype.h'      ; p='%INC_DIR%\ctype.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/errno.h'      ; p='%INC_DIR%\errno.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/include/time.h'       ; p='%INC_DIR%\time.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/alltypes.h.in'; p='%BITS_DIR%\alltypes.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/endian.h'     ; p='%BITS_DIR%\endian.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/limits.h'     ; p='%BITS_DIR%\limits.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/stdint.h'     ; p='%BITS_DIR%\stdint.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/float.h'      ; p='%BITS_DIR%\float.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/wordsize.h'   ; p='%BITS_DIR%\wordsize.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/x86_64/bits/types.h'      ; p='%BITS_DIR%\types.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/generic/bits/time.h'      ; p='%BITS_DIR%\time.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/generic/bits/signal.h'    ; p='%BITS_DIR%\signal.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/generic/bits/setjmp.h'    ; p='%BITS_DIR%\setjmp.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/generic/bits/stdarg.h'    ; p='%BITS_DIR%\stdarg.h'}," ^
-  "  @{u='https://git.musl-libc.org/cgit/musl/plain/arch/generic/bits/errno.h'     ; p='%BITS_DIR%\errno.h'}" ^
-  ");" ^
-  "foreach($f in $files){ if(!(Test-Path (Split-Path $f.p))){ New-Item -ItemType Directory -Force -Path (Split-Path $f.p) | Out-Null }; try { Invoke-WebRequest -UseBasicParsing -Uri $f.u -OutFile $f.p } catch { Write-Error \"DL fail: $($f.u)\"; exit 1 } }"
-if errorlevel 1 (
-  echo [!] Failed to fetch musl headers
+REM ===== C headers: local-only (no auto-download) =====
+if not exist "%INC_DIR%" (
+  echo [!] Missing headers directory: %INC_DIR%
+  echo     Add required C headers locally: stdint.h, stddef.h, etc.
   exit /b 1
+) else (
+  echo [=] Using local headers in %INC_DIR%
 )
 
 REM NOTE: musl fournit des en-tetes de libc. Tu compiles en freestanding: evite d'appeler des fonctions libc.
 REM       Ici on les prend pour satisfaire des #include (types/macros). Pas de linkage libm/libc.
 
 REM ---- Compile kernel (ajout des includes locaux) ----
-"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel -I "%LIMINE_DIR%" -I "%INC_DIR%" -I "%STB_DIR%" -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
+"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel -I "%LIMINE_DIR%" -I "%INC_DIR%" -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
 if errorlevel 1 exit /b 1
 
 REM ---- Link kernel ----
@@ -129,10 +89,8 @@ copy /Y "%LIMINE_DIR%\limine-bios-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\limine-uefi-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\BOOTX64.EFI" "%ISO_DIR%\EFI\BOOT\" >nul
 
-REM Download Inter font (for future use) if missing
-if not exist "%ISO_DIR%\assets\Inter.ttf" (
-    powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip' -OutFile 'inter.zip'; Add-Type -A 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::ExtractToDirectory('inter.zip','inter_tmp'); Copy-Item -Path inter_tmp\*.ttf -Destination '%ISO_DIR%\assets\' -ErrorAction SilentlyContinue; Remove-Item inter.zip -Force; Remove-Item inter_tmp -Recurse -Force } catch { }"
-)
+REM Optional font: copy local assets\Inter.ttf if present (no download)
+if exist "assets\Inter.ttf" copy /Y "assets\Inter.ttf" "%ISO_DIR%\assets\Inter.ttf" >nul
 
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\limine.conf" >nul
 copy /Y limine.conf "%ISO_DIR%\EFI\BOOT\LIMINE.CONF" >nul
