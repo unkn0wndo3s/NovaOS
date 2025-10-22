@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions
 
 cd /d "%~dp0"
 
@@ -93,6 +93,9 @@ echo [=] Using C headers in %INC_DIR%
 REM NOTE: musl fournit des en-tetes de libc. Tu compiles en freestanding: evite d'appeler des fonctions libc.
 REM       Ici on les prend pour satisfaire des #include (types/macros). Pas de linkage libm/libc.
 
+REM ---- Fallback: fetch prebuilt musl headers if bits/alltypes.h missing ----
+if not exist "%INC_DIR%\bits\alltypes.h" call :install_prebuilt_musl
+
 REM ---- Compile kernel (ajout des includes locaux) ----
 "%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel -I "%LIMINE_DIR%" -I "%INC_DIR%" -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
 if errorlevel 1 exit /b 1
@@ -146,3 +149,35 @@ REM ---- Run with QEMU (BIOS) ----
 qemu-system-x86_64 -m 256M -cdrom "%ISO_IMAGE%" -boot d -serial stdio -no-reboot -no-shutdown
 
 endlocal
+
+goto :eof
+
+:install_prebuilt_musl
+echo [!] bits\alltypes.h missing; fetching prebuilt musl headers (musl.cc)...
+set MUSL_TOOL_URL=https://musl.cc/x86_64-linux-musl-native.tgz
+set MUSL_TOOL_TGZ=%BUILD_DIR%\x86_64-linux-musl-native.tgz
+set MUSL_TOOL_DIR=%BUILD_DIR%\x86_64-linux-musl-native
+echo [.] Downloading %MUSL_TOOL_URL%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing -Uri '%MUSL_TOOL_URL%' -OutFile '%MUSL_TOOL_TGZ%'; exit 0 } catch { exit 1 }"
+if errorlevel 1 (
+  where curl >nul 2>nul && curl -L "%MUSL_TOOL_URL%" -o "%MUSL_TOOL_TGZ%"
+)
+if not exist "%MUSL_TOOL_TGZ%" (
+  echo [!] Failed to download musl toolchain archive from musl.cc
+  exit /b 1
+)
+if exist "%MUSL_TOOL_DIR%" rmdir /s /q "%MUSL_TOOL_DIR%"
+mkdir "%MUSL_TOOL_DIR%"
+tar -xf "%MUSL_TOOL_TGZ%" -C "%BUILD_DIR%"
+if not exist "%BUILD_DIR%\x86_64-linux-musl-native\include\stdio.h" (
+  echo [!] Unexpected musl toolchain layout; include not found
+  exit /b 1
+)
+echo [.] Installing prebuilt musl include headers...
+xcopy /E /I /Y "%BUILD_DIR%\x86_64-linux-musl-native\include\" "%INC_DIR%\" >nul
+if not exist "%INC_DIR%\bits\alltypes.h" (
+  echo [!] Still missing bits\alltypes.h after installing prebuilt headers
+  exit /b 1
+)
+echo [=] Using prebuilt musl headers from musl.cc
+exit /b 0

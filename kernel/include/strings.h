@@ -5,7 +5,6 @@
 extern "C" {
 #endif
 
-#include <features.h>
 
 #define __NEED_size_t
 #define __NEED_locale_t

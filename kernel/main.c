@@ -69,6 +69,9 @@ static void kfree(void *p) { (void)p; }
 // ----------------- stb_image (GIF only) -----------------
 #define STBI_NO_STDIO
 #define STBI_ONLY_GIF
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_ASSERT(x) ((void)0)
 #define STBI_MALLOC(sz) kmalloc(sz)
 #define STBI_REALLOC(p,nsz) krealloc((p),(nsz))
 #define STBI_FREE(p) kfree(p)
