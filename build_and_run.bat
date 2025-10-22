@@ -112,7 +112,7 @@ REM ---- Install Limine to ISO (BIOS) ----
 echo ISO created at %ISO_IMAGE%
 
 REM ---- (Optional) List ISO contents for sanity ----
-"%XORRISO%" -indev "%ISO_IMAGE%" -find / -type f -print
+"%XORRISO%" -indev "%ISO_IMAGE%" -ls /
 
 REM ---- Run with QEMU (BIOS) ----
 qemu-system-x86_64 -m 256M -cdrom "%ISO_IMAGE%" -boot d -serial stdio -no-reboot -no-shutdown
