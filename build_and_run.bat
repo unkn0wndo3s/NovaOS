@@ -1,5 +1,5 @@
 @echo off
-setlocal enableextensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 cd /d "%~dp0"
 
@@ -16,6 +16,9 @@ set STB_DIR=kernel\stb
 set INC_DIR=kernel\include
 set BITS_DIR=kernel\include\bits
 set LOADER_DIR=kernel\loader
+set MUSL_VER=1.2.5
+set MUSL_ZIP=%BUILD_DIR%\musl-%MUSL_VER%.zip
+set MUSL_DIR=%BUILD_DIR%\musl-%MUSL_VER%
 
 REM ---- Tools (require LLVM, xorriso, QEMU in PATH) ----
 set CC=clang
@@ -40,23 +43,52 @@ if not exist "kernel" mkdir "kernel"
 if not exist "%INC_DIR%" mkdir "%INC_DIR%"
 if not exist "%BITS_DIR%" mkdir "%BITS_DIR%"
 
-REM ===== stb_image header: local-only (no auto-download) =====
+REM ===== stb_image header: fetch if missing =====
 if not exist "kernel\stb_image.h" (
-  echo [!] Missing required header: kernel\stb_image.h
-  echo     Place a local copy of stb_image.h and re-run.
-  exit /b 1
-) else (
-  echo [=] Using local stb_image.h
+  echo [.] Downloading stb_image.h...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/nothings/stb/master/stb_image.h' -OutFile 'kernel/stb_image.h'; exit 0 } catch { exit 1 }"
+  if errorlevel 1 (
+    where curl >nul 2>nul && curl -L "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h" -o "kernel/stb_image.h"
+  )
+  if not exist "kernel\stb_image.h" (
+    echo [!] Failed to fetch kernel\stb_image.h automatically.
+    echo     Please download from: https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
+    echo     and place it at: kernel\stb_image.h
+    exit /b 1
+  )
 )
+echo [=] Using stb_image.h
 
-REM ===== C headers: local-only (no auto-download) =====
-if not exist "%INC_DIR%" (
-  echo [!] Missing headers directory: %INC_DIR%
-  echo     Add required C headers locally: stdint.h, stddef.h, etc.
-  exit /b 1
-) else (
-  echo [=] Using local headers in %INC_DIR%
+REM ===== musl C headers: fetch if missing =====
+if exist "%INC_DIR%\stdlib.h" goto have_headers
+echo [.] Downloading musl headers v%MUSL_VER%...
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/bminor/musl/zip/refs/tags/v%MUSL_VER%' -OutFile '%MUSL_ZIP%'; exit 0 } catch { exit 1 }"
+if errorlevel 1 (
+  where curl >nul 2>nul && curl -L "https://codeload.github.com/bminor/musl/zip/refs/tags/v%MUSL_VER%" -o "%MUSL_ZIP%"
 )
+if not exist "%MUSL_ZIP%" (
+  echo [!] Failed to download musl headers archive.
+  echo     URL: https://codeload.github.com/bminor/musl/zip/refs/tags/v%MUSL_VER%
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%MUSL_ZIP%' -DestinationPath '%BUILD_DIR%' -Force"
+for /d %%D in ("%BUILD_DIR%\musl-*%MUSL_VER%*") do set "MUSL_DIR=%%D"
+if not defined MUSL_DIR (
+  echo [!] musl extract directory not found.
+  exit /b 1
+)
+if not exist "%INC_DIR%" mkdir "%INC_DIR%"
+if not exist "%BITS_DIR%" mkdir "%BITS_DIR%"
+echo [.] Installing musl include headers...
+xcopy /E /I /Y "%MUSL_DIR%\include\" "%INC_DIR%\" >nul
+echo [.] Installing musl generic bits...
+if exist "%MUSL_DIR%\arch\generic\bits\" xcopy /E /I /Y "%MUSL_DIR%\arch\generic\bits\" "%BITS_DIR%\" >nul
+echo [.] Installing musl x86_64 bits (overrides)...
+if exist "%MUSL_DIR%\arch\x86_64\bits\" xcopy /E /I /Y "%MUSL_DIR%\arch\x86_64\bits\" "%BITS_DIR%\" >nul
+
+:have_headers
+echo [=] Using C headers in %INC_DIR%
 
 REM NOTE: musl fournit des en-tetes de libc. Tu compiles en freestanding: evite d'appeler des fonctions libc.
 REM       Ici on les prend pour satisfaire des #include (types/macros). Pas de linkage libm/libc.
