@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-REM ===== Nova OS Build & Run (Limine 10.1.1) =====
+REM ===== Nova OS Build & Run (Limine 10.x + libnsgif) =====
 
 REM ---- Config ----
 set "PROJECT_NAME=NovaOS"
@@ -14,6 +14,9 @@ set "LIMINE_DIR=Limine"
 set "INC_DIR=kernel\include"
 set "BITS_DIR=kernel\include\bits"
 set "LOADER_DIR=kernel\loader"
+set "TP_DIR=third_party"
+set "NSGIF_DIR=%TP_DIR%\libnsgif"
+
 set "MUSL_VER=1.2.5"
 set "MUSL_ZIP=%BUILD_DIR%\musl-%MUSL_VER%.zip"
 
@@ -23,6 +26,7 @@ set "LD=ld.lld"
 set "ARCH_TARGET=x86_64-unknown-elf"
 set "QEMU=qemu-system-x86_64"
 set "XORRISO=%USERPROFILE%\scoop\apps\msys2\current\usr\bin\xorriso.exe"
+set "GIT=git"
 
 echo [*] Prep environment...
 
@@ -33,36 +37,29 @@ where winget >nul 2>nul && set "HAVE_WINGET=1"
 where scoop  >nul 2>nul && set "HAVE_SCOOP=1"
 
 REM ===== LLVM =====
-where %CC% >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+where %CC% >nul 2>nul || (
   echo [!] LLVM not found, installing...
-  if defined HAVE_WINGET ( winget install -e --id LLVM.LLVM -h ) else if defined HAVE_SCOOP ( scoop install llvm ) else ( echo [X] No pkg mgr. Install LLVM and rerun. & exit /b 1 )
+  if defined HAVE_WINGET ( winget install -e --id LLVM.LLVM -h ) else if defined HAVE_SCOOP ( scoop install llvm ) else ( echo [X] No package manager. Install LLVM and rerun. & exit /b 1 )
 )
-where %LD% >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+where %LD% >nul 2>nul || (
   echo [!] ld.lld not found, installing...
-  if defined HAVE_WINGET ( winget install -e --id LLVM.LLVM -h ) else if defined HAVE_SCOOP ( scoop install llvm ) else ( echo [X] No pkg mgr. Install LLVM and rerun. & exit /b 1 )
+  if defined HAVE_WINGET ( winget install -e --id LLVM.LLVM -h ) else if defined HAVE_SCOOP ( scoop install llvm ) else ( echo [X] No package manager. Install LLVM and rerun. & exit /b 1 )
 )
 
 REM ===== QEMU =====
-where %QEMU% >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+where %QEMU% >nul 2>nul || (
   echo [!] QEMU not found, installing...
-  if defined HAVE_WINGET ( winget install -e --id qemu.qemu -h ) else if defined HAVE_SCOOP ( scoop install qemu ) else ( echo [X] No pkg mgr. Install QEMU and rerun. & exit /b 1 )
+  if defined HAVE_WINGET ( winget install -e --id qemu.qemu -h ) else if defined HAVE_SCOOP ( scoop install qemu ) else ( echo [X] No package manager. Install QEMU and rerun. & exit /b 1 )
 )
 
 REM ===== xorriso =====
 if exist "%XORRISO%" (
   echo [=] Using xorriso: %XORRISO%
 ) else (
-  where xorriso >nul 2>nul
-  if %ERRORLEVEL% EQU 0 (
-    set "XORRISO=xorriso"
-    echo [=] Using system xorriso
-  ) else (
-    echo [!] xorriso not found.
+  where xorriso >nul 2>nul && ( set "XORRISO=xorriso" & echo [=] Using system xorriso ) || (
+    echo [!] xorriso not found
     if defined HAVE_SCOOP (
-      echo [.] Installing MSYS2 then xorriso...
+      echo [.] Installing MSYS2 then xorriso
       scoop install msys2
       "%USERPROFILE%\scoop\apps\msys2\current\usr\bin\bash.exe" -lc "pacman -S --noconfirm xorriso"
       if exist "%USERPROFILE%\scoop\apps\msys2\current\usr\bin\xorriso.exe" (
@@ -73,14 +70,20 @@ if exist "%XORRISO%" (
         exit /b 1
       )
     ) else if defined HAVE_WINGET (
-      echo [!] Install MSYS2 via winget, then in MSYS2: pacman -S xorriso
+      echo [!] Install MSYS2 via winget, then run in MSYS2: pacman -S xorriso
       winget install -e --id MSYS2.MSYS2 -h
       exit /b 1
     ) else (
-      echo [X] No xorriso available. Install MSYS2+xorriso.
+      echo [X] No xorriso available. Install MSYS2 + xorriso.
       exit /b 1
     )
   )
+)
+
+REM ===== git =====
+where %GIT% >nul 2>nul || (
+  echo [!] Git not found, installing...
+  if defined HAVE_WINGET ( winget install -e --id Git.Git -h ) else if defined HAVE_SCOOP ( scoop install git ) else ( echo [X] No package manager. Install Git and rerun. & exit /b 1 )
 )
 
 REM ===== Limine binaries =====
@@ -90,7 +93,7 @@ if not exist "%LIMINE_DIR%\limine-bios.sys" (
   exit /b 1
 )
 
-REM ===== Clean =====
+REM ===== Clean dirs =====
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 if exist "%ISO_DIR%"   rmdir /s /q "%ISO_DIR%"
 
@@ -98,12 +101,12 @@ mkdir "%BUILD_DIR%" >nul
 mkdir "%ISO_DIR%" >nul
 mkdir "%ISO_DIR%\boot\limine" >nul
 mkdir "%ISO_DIR%\EFI\BOOT" >nul
-mkdir "%ISO_DIR%\limine" >nul
 mkdir "%ISO_DIR%\loader" >nul
 if not exist "%INC_DIR%"  mkdir "%INC_DIR%"
 if not exist "%BITS_DIR%" mkdir "%BITS_DIR%"
+if not exist "%TP_DIR%"   mkdir "%TP_DIR%"
 
-REM ===== musl headers (pour <stdint.h>, etc.) =====
+REM ===== musl headers (stdint.h, etc.) =====
 if not exist "%INC_DIR%\stdlib.h" (
   echo [.] Downloading musl headers v%MUSL_VER%...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/bminor/musl/zip/refs/tags/v%MUSL_VER%' -OutFile '%MUSL_ZIP%'"
@@ -121,27 +124,61 @@ if not exist "%INC_DIR%\bits\alltypes.h" (
   set "MUSL_TOOL_TGZ=%BUILD_DIR%\x86_64-linux-musl-native.tgz"
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -UseBasicParsing -Uri '%MUSL_TOOL_URL%' -OutFile '%MUSL_TOOL_TGZ%'"
   mkdir "%BUILD_DIR%\_musl_tmp"
-  tar -xf "%MUSL_TOOL_TGZ%" -C "%BUILD_DIR%\_musl_tmp%"
+  tar -xf "%MUSL_TOOL_TGZ%" -C "%BUILD_DIR%\_musl_tmp"
   xcopy /E /I /Y "%BUILD_DIR%\_musl_tmp%\x86_64-linux-musl-native\include\" "%INC_DIR%\" >nul
-  rmdir /s /q "%BUILD_DIR%\_musl_tmp%" >nul 2>nul
+  rmdir /s /q "%BUILD_DIR%\_musl_tmp" >nul 2>nul
   if not exist "%INC_DIR%\bits\alltypes.h" ( echo [X] still missing alltypes.h & exit /b 1 )
 )
 
 echo [=] Using C headers in %INC_DIR%
 
-REM ===== Vérif GIF (on utilise désormais le 1er module seulement) =====
-if not exist "%LOADER_DIR%\stage1.gif" ( echo [X] Missing %LOADER_DIR%\stage1.gif & exit /b 1 )
-if not exist "%LOADER_DIR%\stage2.gif" ( echo [X] Missing %LOADER_DIR%\stage2.gif & exit /b 1 )
-if not exist "%LOADER_DIR%\stage3.gif" ( echo [X] Missing %LOADER_DIR%\stage3.gif & exit /b 1 )
+REM ===== libnsgif (sparse checkout Windows-safe, no test/ paths) =====
+REM Si un ancien clone foireux existe -> purge
+if exist "%NSGIF_DIR%\include\nsgif.h" goto :libnsgif_ok
+if exist "%NSGIF_DIR%" rmdir /s /q "%NSGIF_DIR%"
+mkdir "%TP_DIR%" >nul 2>nul
 
-REM ===== Compile kernel =====
+echo [*] Cloning libnsgif (no-checkout)
+"%GIT%" clone --depth 1 --no-checkout https://github.com/netsurf-browser/libnsgif "%NSGIF_DIR%"
+if %ERRORLEVEL% NEQ 0 ( echo [X] git clone libnsgif failed & exit /b 1 )
+
+echo [*] Checking out libnsgif subset (include/, src/, COPYING, README.md)
+"%GIT%" -C "%NSGIF_DIR%" rev-parse --verify origin/HEAD >nul 2>&1
+if %ERRORLEVEL% NEQ 0 ( echo [X] libnsgif origin/HEAD not found & exit /b 1 )
+"%GIT%" -C "%NSGIF_DIR%" checkout --force --quiet origin/HEAD -- include src COPYING README.md
+if %ERRORLEVEL% NEQ 0 ( echo [X] git selective checkout failed & exit /b 1 )
+
+:libnsgif_ok
+echo [=] libnsgif ready
+
+
+REM ===== Verify GIF module =====
+if not exist "%LOADER_DIR%\stage1.gif" ( echo [X] Missing %LOADER_DIR%\stage1.gif & exit /b 1 )
+
+REM ===== Compile kernel + libnsgif =====
 echo [*] Compile kernel...
-"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel -I "%LIMINE_DIR%" -I "%INC_DIR%" -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
+"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -pipe -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel ^
+  -I "%LIMINE_DIR%" -I "%INC_DIR%" -I "%NSGIF_DIR%\include" ^
+  -fno-asynchronous-unwind-tables -fno-exceptions -c kernel\main.c -o "%BUILD_DIR%\kernel.o"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
+echo [*] Compile runtime...
+"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel ^
+  -I "%INC_DIR%" -c kernel\runtime.c -o "%BUILD_DIR%\runtime.o"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
+echo [*] Compile libnsgif...
+"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel ^
+  -I "%INC_DIR%" -I "%NSGIF_DIR%\include" -c "%NSGIF_DIR%\src\gif.c" -o "%BUILD_DIR%\gif.o"
+if %ERRORLEVEL% NEQ 0 exit /b 1
+"%CC%" -target %ARCH_TARGET% -std=gnu11 -O2 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -m64 -mcmodel=kernel ^
+  -I "%INC_DIR%" -I "%NSGIF_DIR%\include" -c "%NSGIF_DIR%\src\lzw.c" -o "%BUILD_DIR%\lzw.o"
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
 REM ===== Link kernel =====
 echo [*] Linking kernel...
-"%LD%" -m elf_x86_64 -o "%KERNEL_ELF%" -nostdlib -z max-page-size=0x1000 -T kernel\linker.ld "%BUILD_DIR%\kernel.o"
+"%LD%" -m elf_x86_64 -o "%KERNEL_ELF%" -nostdlib -z max-page-size=0x1000 -T kernel\linker.ld ^
+  "%BUILD_DIR%\kernel.o" "%BUILD_DIR%\runtime.o" "%BUILD_DIR%\gif.o" "%BUILD_DIR%\lzw.o"
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
 REM ===== Prepare ISO contents =====
@@ -153,8 +190,6 @@ copy /Y "%LIMINE_DIR%\limine-bios-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\limine-uefi-cd.bin" "%ISO_DIR%\" >nul
 copy /Y "%LIMINE_DIR%\BOOTX64.EFI"        "%ISO_DIR%\EFI\BOOT\" >nul
 copy /Y "%LOADER_DIR%\stage1.gif" "%ISO_DIR%\loader\stage1.gif" >nul
-copy /Y "%LOADER_DIR%\stage2.gif" "%ISO_DIR%\loader\stage2.gif" >nul
-copy /Y "%LOADER_DIR%\stage3.gif" "%ISO_DIR%\loader\stage3.gif" >nul
 
 REM ===== Create ISO =====
 echo [*] Creating ISO image...
