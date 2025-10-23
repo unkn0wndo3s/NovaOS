@@ -1,14 +1,17 @@
 // Nova OS — GIF player via libnsgif (C99, Limine 10.x)
-// - Décode avec libnsgif (API nsgif_*), output 32bpp R8G8B8A8
-// - Rendu centré dans le framebuffer Limine, damier sous alpha=0
-// - Respect du délai par frame (centisecondes -> ms)
-// - Aucun malloc système : petit arena statique
+// - Décode libnsgif, sortie 32bpp
+// - Affiche centré dans le framebuffer (damier visible sous alpha=0)
+// - Délai par frame respecté (centisecondes -> ms)
+// - Alloc simple (arena) pour buffers bitmap
 
 #include <stdint.h>
 #include <stddef.h>
 #include <limine.h>
+#include "nsgif.h"  // third_party/libnsgif/include
 
-#include "nsgif.h"  // fourni par third_party/libnsgif/include
+/* Ensure Limine discovers our requests */
+LIMINE_BASE_REVISION(0)
+LIMINE_REQUESTS_START_MARKER
 
 /* ---------- Limine requests ---------- */
 static volatile struct limine_framebuffer_request fb_req = {
@@ -18,15 +21,9 @@ static volatile struct limine_module_request mod_req = {
     .id = LIMINE_MODULE_REQUEST, .revision = 0
 };
 
-/* ---------- mini-libc ---------- */
-static void *memcpy(void *d, const void *s, size_t n){
-    uint8_t*D=(uint8_t*)d; const uint8_t*S=(const uint8_t*)s;
-    for(size_t i=0;i<n;i++) D[i]=S[i]; return d;
-}
-static int memcmp(const void *a, const void *b, size_t n){
-    const uint8_t*A=(const uint8_t*)a,*B=(const uint8_t*)b;
-    for(size_t i=0;i<n;i++){ if(A[i]!=B[i]) return A[i]<B[i]?-1:1; } return 0;
-}
+LIMINE_REQUESTS_END_MARKER
+
+/* ---------- utils ---------- */
 static void hcf(void){ __asm__ __volatile__("cli"); for(;;) __asm__ __volatile__("hlt"); }
 
 /* ---------- bump allocator (freestanding) pour les bitmaps libnsgif ---------- */
@@ -71,13 +68,15 @@ static inline void put_px(struct limine_framebuffer *fb, uint64_t x, uint64_t y,
 
 static void fill(struct limine_framebuffer *fb, uint8_t r, uint8_t g, uint8_t b){
     uint32_t rgb = fb_pack(fb,r,g,b);
+    uint32_t bpp = fb->bpp ? fb->bpp : 32;
+    uint32_t bytes = (bpp + 7u)/8u;
     for (uint64_t y=0; y<fb->height; y++){
         uint8_t *row = (uint8_t*)fb->address + y*fb->pitch;
-        uint32_t bpp = fb->bpp ? fb->bpp : 32;
-        uint32_t bytes = (bpp + 7u)/8u;
-        for (uint64_t x=0; x<fb->width; x++){
-            if (bytes>=4){ ((uint32_t*)row)[x] = rgb; }
-            else put_px_raw(fb,x,y,rgb);
+        if (bytes>=4){ 
+            uint32_t *p = (uint32_t*)row;
+            for (uint64_t x=0; x<fb->width; x++) p[x] = rgb;
+        } else {
+            for (uint64_t x=0; x<fb->width; x++) put_px_raw(fb,x,y,rgb);
         }
     }
 }
@@ -87,16 +86,34 @@ static inline uint32_t checker_rgb(struct limine_framebuffer *fb, int x, int y){
     return fb_pack(fb, tile ? 0x7F : 0x00, tile ? 0x7F : 0x00, tile ? 0x7F : 0x00);
 }
 
-static void blit_center_R8G8B8A8(struct limine_framebuffer *fb, const uint8_t *rgba, int w, int h){
-    if (!rgba || w<=0 || h<=0) return;
+static void blit_center_guess32(struct limine_framebuffer *fb, const uint8_t *buf, int w, int h){
+    if (!buf || w<=0 || h<=0) return;
     int dx = (fb->width  > (uint64_t)w) ? (int)((fb->width  - (uint64_t)w)/2) : 0;
     int dy = (fb->height > (uint64_t)h) ? (int)((fb->height - (uint64_t)h)/2) : 0;
+
+    int sample = w < 32 ? w : 32;
+    int rgba_alpha_zero = 1, bgra_alpha_zero = 1;
+    for (int x=0; x<sample; x++){
+        const uint8_t *p = &buf[4*(size_t)x];
+        if (p[3] != 0) rgba_alpha_zero = 0; // alpha 4e octet
+        if (p[0] != 0) bgra_alpha_zero = 0; // alpha 1er octet (ARGB)
+    }
+    enum {FMT_RGBA, FMT_BGRA, FMT_OPAQUE} fmt =
+        (!rgba_alpha_zero) ? FMT_RGBA :
+        (!bgra_alpha_zero) ? FMT_BGRA : FMT_OPAQUE;
+
     for (int y=0; y<h; y++){
         int py = dy + y; if (py<0 || (uint64_t)py>=fb->height) continue;
-        const uint8_t *src = rgba + (size_t)y*(size_t)w*4u;
+        const uint8_t *src = buf + (size_t)y*(size_t)w*4u;
         for (int x=0; x<w; x++){
             int px = dx + x; if (px<0 || (uint64_t)px>=fb->width) continue;
-            uint8_t R=src[4u*(size_t)x+0], G=src[4u*(size_t)x+1], B=src[4u*(size_t)x+2], A=src[4u*(size_t)x+3];
+            const uint8_t *p = &src[4u*(size_t)x];
+
+            uint8_t R,G,B,A;
+            if (fmt == FMT_RGBA){ R=p[0]; G=p[1]; B=p[2]; A=p[3]; }
+            else if (fmt == FMT_BGRA){ B=p[0]; G=p[1]; R=p[2]; A=p[3]; }
+            else { R=p[0]; G=p[1]; B=p[2]; A=255; }
+
             if (A) put_px(fb,(uint64_t)px,(uint64_t)py,R,G,B);
             else   put_px_raw(fb,(uint64_t)px,(uint64_t)py, checker_rgb(fb, px, py));
         }
@@ -109,14 +126,13 @@ static void spin_ms(uint32_t ms){
 }
 
 /* ---------- libnsgif: callbacks bitmap ---------- */
-/* libnsgif décode toujours en 32bpp ; on choisit l’ordre R8G8B8A8 pour simplicité */
 static nsgif_bitmap_t *bm_create(int w, int h){
     size_t sz = (size_t)w * (size_t)h * 4u;
-    return AALLOC(sz); /* zone renvoyée = buffer pixels */
+    return AALLOC(sz); /* buffer pixels */
 }
-static void bm_destroy(nsgif_bitmap_t *bitmap){ (void)bitmap; /* no-op */ }
+static void bm_destroy(nsgif_bitmap_t *bitmap){ (void)bitmap; }
 static uint8_t *bm_get_buffer(nsgif_bitmap_t *bitmap){ return (uint8_t*)bitmap; }
-static void bm_modified(nsgif_bitmap_t *bitmap){ (void)bitmap; /* no-op */ }
+static void bm_modified(nsgif_bitmap_t *bitmap){ (void)bitmap; }
 
 /* ---------- entry ---------- */
 void _start(void){
@@ -142,7 +158,7 @@ void _start(void){
     const unsigned char *gif_bytes = (const unsigned char*)f->address;
     size_t gif_size = (size_t)f->size;
 
-    /* Fond damier (comme example.c) */
+    /* Fond damier */
     for (uint64_t y=0; y<fb->height; y++)
         for (uint64_t x=0; x<fb->width; x++)
             put_px_raw(fb, x, y, checker_rgb(fb, (int)x, (int)y));
@@ -159,45 +175,35 @@ void _start(void){
     nsgif_error err = nsgif_create(&cb, NSGIF_BITMAP_FMT_R8G8B8A8, &gif);
     if (err != NSGIF_OK || !gif){ fill(fb,180,0,0); hcf(); }
 
-    /* On indique toutes les données d’un coup (déjà en mémoire via Limine) */
+    /* On indique toutes les données d’un coup */
     err = nsgif_data_scan(gif, gif_size, gif_bytes);
     if (err != NSGIF_OK){ fill(fb,180,0,0); hcf(); }
-    nsgif_data_complete(gif); /* optionnel mais conseillé */
+    nsgif_data_complete(gif);
 
-    /* Boucle d’animation façon example.c */
+    /* Boucle d’animation */
     for(;;){
         nsgif_rect_t area;
         uint32_t delay_cs;
         uint32_t frame_new;
         err = nsgif_frame_prepare(gif, &area, &delay_cs, &frame_new);
         if (err == NSGIF_ERR_ANIMATION_END){
-            /* L’animation a une fin → recommencer depuis le début */
             nsgif_reset(gif);
             continue;
         }
-        if (err != NSGIF_OK){
-            fill(fb,180,0,0); hcf();
-        }
+        if (err != NSGIF_OK){ fill(fb,180,0,0); hcf(); }
 
         nsgif_bitmap_t *bitmap = NULL;
         err = nsgif_frame_decode(gif, frame_new, &bitmap);
-        if (err != NSGIF_OK){
-            fill(fb,180,0,0); hcf();
-        }
+        if (err != NSGIF_OK){ fill(fb,180,0,0); hcf(); }
 
-        /* bitmap pointe sur notre buffer R8G8B8A8 (via callbacks) */
-        const uint8_t *rgba = bm_get_buffer(bitmap);
+        const uint8_t *buf = bm_get_buffer(bitmap);
         const nsgif_info_t *info = nsgif_get_info(gif);
         if (!info){ fill(fb,180,0,0); hcf(); }
-        blit_center_R8G8B8A8(fb, rgba, (int)info->width, (int)info->height);
 
-        /* Délai (centisecondes → ms). NSGIF_INFINITE => image fixe */
+        blit_center_guess32(fb, buf, (int)info->width, (int)info->height);
+
         uint32_t ms = (delay_cs == NSGIF_INFINITE) ? 1000u : (delay_cs*10u);
         if (ms == 0) ms = 33u;
         spin_ms(ms);
     }
-
-    /* unreachable */
-    // nsgif_destroy(gif);
-    // hcf();
 }

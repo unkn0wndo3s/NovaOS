@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// -------- Memory primitives --------
 void *memcpy(void *dest, const void *src, size_t n){
     uint8_t *d = (uint8_t*)dest; const uint8_t *s = (const uint8_t*)src;
     for (size_t i = 0; i < n; i++) d[i] = s[i];
@@ -46,10 +45,7 @@ int strncmp(const char *a, const char *b, size_t n){
     return 0;
 }
 
-// -------- Very simple bump allocator --------
-// This is intentionally trivial: allocations never shrink and free is a no-op.
-// Sufficient for libnsgif usage in our boot-time scenario.
-
+/* -------- Very simple bump allocator -------- */
 #define KHEAP_SIZE (4u*1024u*1024u)
 static uint8_t KHEAP[KHEAP_SIZE];
 typedef struct HeapHeader { size_t size; } HeapHeader;
@@ -73,7 +69,6 @@ void *malloc(size_t size){
 }
 
 void *calloc(size_t nmemb, size_t size){
-    // detect overflow
     if (nmemb && size > ((size_t)-1) / nmemb) return (void*)0;
     size_t total = nmemb * size;
     void *p = heap_alloc(total);
@@ -84,22 +79,17 @@ void *calloc(size_t nmemb, size_t size){
 void *realloc(void *ptr, size_t new_size){
     if (ptr == (void*)0) return malloc(new_size);
     if (new_size == 0){ free(ptr); return (void*)0; }
-    // find header to get old size
     HeapHeader *h = (HeapHeader*)ptr - 1;
     size_t old_size = h->size;
     void *np = heap_alloc(new_size);
     if (!np) return (void*)0;
     size_t copy = (old_size < new_size) ? old_size : new_size;
     memmove(np, ptr, copy);
-    // old block remains (free is no-op)
     return np;
 }
 
-// -------- assert handler --------
+/* -------- assert handler -------- */
 void __assert_fail(const char *expr, const char *file, int line, const char *func){
     (void)expr; (void)file; (void)line; (void)func;
-    // Halt: spin forever
     for(;;){ __asm__ __volatile__("hlt"); }
 }
-
-
