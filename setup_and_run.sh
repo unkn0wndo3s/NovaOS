@@ -10,34 +10,30 @@ PATH="$PREFIX/bin:$PATH"
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Manquant: $1"; return 1; }; }
 fail_missing() { echo "Erreur: dépendances manquantes. Installe-les puis relance."; exit 1; }
 
-# ---------- Déps système (OSDev) ----------
-echo "[*] Vérif/installation dépendances système (build & tools liés aux tutos OSDev)"
+# ---------- Déps système ----------
+echo "[*] Vérif/installation dépendances système"
 if command -v apt >/dev/null 2>&1; then
-  sudo apt update
+  sudo apt update -y
   sudo apt install -y build-essential make bison flex libgmp3-dev libmpfr-dev libmpc-dev texinfo \
-                      qemu-system-x86 xorriso nasm git
+                      qemu-system-x86 xorriso nasm git xxd
 else
-  echo "Apt non détecté. Installe les dépendances équivalentes selon ta distro (OSDev)."
+  echo "Apt non détecté. Installe équivalents (incluant xxd)."
 fi
 
 # ---------- Check outils ----------
 echo "[*] Vérif outils requis"
 MIS=0
-for b in make nasm xorriso qemu-system-x86_64 git; do need "$b" || MIS=1; done
+for b in make nasm xorriso qemu-system-x86_64 git xxd; do need "$b" || MIS=1; done
 [ $MIS -eq 1 ] && fail_missing
 
-# ---------- Cross-compiler (OSDev GCC Cross-Compiler) ----------
+# ---------- Cross-compiler ----------
 if ! command -v "${TARGET}-gcc" >/dev/null 2>&1; then
-  echo "[*] Cross-compiler ${TARGET}-gcc absent -> construction (OSDev GCC Cross-Compiler)"
+  echo "[*] Cross-compiler ${TARGET}-gcc absent -> construction (réf. OSDev)"
   mkdir -p "$HOME/src" && cd "$HOME/src"
-  # NOTE: Télécharge manuellement binutils-<ver> et gcc-<ver> comme expliqué sur le wiki OSDev.
-  # Exemple de répertoire:
-  #   $HOME/src/binutils-<ver>  $HOME/src/gcc-<ver>
   if [ ! -d "binutils-"* ] || [ ! -d "gcc-"* ]; then
-    echo "Télécharge binutils-<ver> et gcc-<ver> dans $HOME/src (conformément au wiki OSDev), puis relance."
+    echo "Télécharge binutils-<ver> et gcc-<ver> dans $HOME/src (suivant OSDev), puis relance."
     exit 1
   fi
-
   BINUTILS_DIR=$(echo binutils-*)
   GCC_DIR=$(echo gcc-*)
 
@@ -53,16 +49,63 @@ if ! command -v "${TARGET}-gcc" >/dev/null 2>&1; then
   make -j"$(nproc)" all-target-libgcc
   make install-gcc
   make install-target-libgcc
-  echo "[*] Cross-compiler installé dans $PREFIX"
 fi
 
-cd "$(dirname "$0")"  # racine du projet
+# ---------- Génération anim_data.c ----------
+cd "$(dirname "$0")"
+echo "[*] Génération src/anim_data.c depuis animations/(images_*.tga|image-*.tga)"
 
-# ---------- Build kernel (Limine Bare Bones makefile) ----------
+mkdir -p src
+TMP=src/anim_data.c
+{
+  echo '#include <stdint.h>'
+  echo '__attribute__((used)) const unsigned int ANIM_FRAMES_COUNT = 0;'
+  echo '__attribute__((used)) const unsigned char *ANIM_FRAMES[] = { };'
+  echo '__attribute__((used)) const unsigned int ANIM_FRAME_SIZES[] = { };'
+} > "$TMP"
+
+# Motifs acceptés et tri naturel
+shopt -s nullglob
+frames=(animations/images_*.tga animations/image-*.tga)
+if ((${#frames[@]})); then
+  mapfile -t FILES < <(printf '%s\n' "${frames[@]}" | LC_ALL=C sort -V)
+
+  echo '#include <stdint.h>' > "$TMP"
+  SYMS_DATA=()
+  SYMS_SIZE=()
+  i=0
+  for f in "${FILES[@]}"; do
+    sym="ANIM_IMG_${i}"
+    # Génère le tableau const et ajoute une constante de compile
+    xxd -i -n "$sym" "$f" \
+      | sed -E '/^unsigned int .*_len =/d;s/^unsigned char /const unsigned char /' >> "$TMP"
+    echo "enum { ${sym}_len = sizeof(${sym}) };" >> "$TMP"
+
+    SYMS_DATA+=("${sym}")
+    SYMS_SIZE+=("${sym}_len")
+    i=$((i+1))
+  done
+
+  echo "__attribute__((used)) const unsigned int ANIM_FRAMES_COUNT = ${#SYMS_DATA[@]};" >> "$TMP"
+
+  echo "__attribute__((used)) const unsigned char *ANIM_FRAMES[] = {" >> "$TMP"
+  for s in "${SYMS_DATA[@]}"; do echo "  ${s}," >> "$TMP"; done
+  echo "};" >> "$TMP"
+
+  echo "__attribute__((used)) const unsigned int ANIM_FRAME_SIZES[] = {" >> "$TMP"
+  for s in "${SYMS_SIZE[@]}"; do echo "  ${s}," >> "$TMP"; done
+  echo "};" >> "$TMP"
+
+  echo "[*] ${#SYMS_DATA[@]} frame(s) intégrée(s) dans src/anim_data.c"
+else
+  echo "[!] Aucune frame trouvée. Place des .tga dans animations/ (images_*.tga ou image-*.tga)."
+fi
+
+# ---------- Build kernel ----------
 echo "[*] Build kernel (myos)"
 make TOOLCHAIN_PREFIX="${TARGET}-"
 
-# ---------- Récupérer et builder Limine (binaire) ----------
+# ---------- Limine (binaire) ----------
 if [ ! -d "limine" ]; then
   echo "[*] Clone Limine binaire (v10.x)"
   git clone https://codeberg.org/Limine/Limine.git limine --branch=v10.x-binary --depth=1
@@ -70,7 +113,7 @@ fi
 echo "[*] Build utilitaire limine"
 make -C limine
 
-# ---------- Préparer ISO (selon Limine Bare Bones) ----------
+# ---------- Préparer ISO ----------
 echo "[*] Préparation ISO (BIOS+UEFI)"
 rm -rf iso_root image.iso || true
 mkdir -p iso_root/boot/limine
