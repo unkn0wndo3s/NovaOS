@@ -3,6 +3,16 @@
 #include <stdbool.h>
 #include <limine.h>
 #include "tga.h"
+#include "../drivers/serial.h"
+#include "../arch/x86_64/idt.h"
+#include "../arch/x86_64/pic.h"
+#include "../drivers/timer.h"
+#include "limine_requests.h"
+#include "../mm/pmm.h"
+#include "../mm/heap.h"
+#include "../drivers/keyboard.h"
+#include "sched.h"
+#include "threads.h"
 
 /* Limine requests */
 __attribute__((used, section(".limine_requests")))
@@ -39,7 +49,20 @@ int memcmp(const void *a,const void *b,size_t n){
 }
 
 void kmain(void) {
+    serial_init();
+    idt_init();
+    pic_remap(0x20, 0x28);
+    timer_init(1000);
+    keyboard_init();
+    __asm__ __volatile__("sti");
+
     if (LIMINE_BASE_REVISION_SUPPORTED == false) hcf();
+
+    /* Init memory: PMM + heap using Limine */
+    volatile struct limine_memmap_response *mm = get_memmap_response();
+    uint64_t hhdm = get_hhdm_offset();
+    pmm_init(mm, hhdm);
+    heap_init(hhdm);
     if (!framebuffer_request.response || framebuffer_request.response->framebuffer_count < 1) hcf();
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
@@ -51,6 +74,12 @@ void kmain(void) {
         hcf();
     }
 
+    /* Scheduler and threads */
+    sched_init();
+    (void)sched_create(thread_log, "log");
+    (void)sched_create(thread_idle, "idle");
+
+    uint64_t next_ms = timer_ticks_ms();
     for (;;) {
         for (unsigned int i = 0; i < ANIM_FRAMES_COUNT; i++) {
             const unsigned char *p = ANIM_FRAMES[i];
@@ -73,7 +102,11 @@ void kmain(void) {
                 continue;
             }
 
-            busy_wait(8000000ULL); /* ajuste la vitesse */
+            /* 30 FPS pacing via PIT ticks (33ms) */
+            next_ms += 33;
+            while (timer_ticks_ms() < next_ms) {
+                __asm__ __volatile__("hlt");
+            }
         }
     }
 }
