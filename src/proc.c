@@ -45,7 +45,8 @@ static void build_initial_user_stack(uint64_t pml4_phys, uint64_t stack_top, con
 }
 
 void proc_spawn_init_from_vfs(void) {
-	const struct vfs_node *node = vfs_get("/bin/init");
+    const struct vfs_node *node = vfs_get("/bin/init");
+    if (!node) node = vfs_get("bin/init");
 	if (!node) {
 		serial_write("[proc] /bin/init not found; skipping userland\n");
 		return;
