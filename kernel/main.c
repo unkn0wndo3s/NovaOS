@@ -13,25 +13,13 @@
 #include "../drivers/keyboard.h"
 #include "sched.h"
 #include "threads.h"
+#include "vfs.h"
 
-/* Limine requests */
+/* Limine base revision check */
 __attribute__((used, section(".limine_requests")))
 static volatile LIMINE_BASE_REVISION(4);
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST,
-    .revision = 0
-};
-__attribute__((used, section(".limine_requests_start")))
-static volatile LIMINE_REQUESTS_START_MARKER;
-__attribute__((used, section(".limine_requests_end")))
-static volatile LIMINE_REQUESTS_END_MARKER;
-
-/* Anim data générée */
-extern const unsigned int ANIM_FRAMES_COUNT;
-extern const unsigned char *ANIM_FRAMES[];
-extern const unsigned int ANIM_FRAME_SIZES[];
+/* Anim chargée via initrd (VFS) */
 
 static void hcf(void){ for(;;){ __asm__ __volatile__("hlt"); } }
 
@@ -63,50 +51,36 @@ void kmain(void) {
     uint64_t hhdm = get_hhdm_offset();
     pmm_init(mm, hhdm);
     heap_init(hhdm);
-    if (!framebuffer_request.response || framebuffer_request.response->framebuffer_count < 1) hcf();
-
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    struct limine_framebuffer *fb = get_framebuffer0();
+    if (!fb || !fb->address) hcf();
     volatile uint32_t *fb_ptr = (volatile uint32_t*)fb->address;
 
-    /* Si aucune frame -> noir et stop (pas d’écran rose) */
-    if (ANIM_FRAMES_COUNT == 0) {
+    /* Monter initrd (module "initrd") en VFS */
+    void *initrd_ptr = 0; uint64_t initrd_sz = 0;
+    if (!get_module_by_string("initrd", &initrd_ptr, &initrd_sz) || !initrd_ptr || initrd_sz == 0) {
+        fb_clear(fb_ptr, fb->width, fb->height, fb->pitch, 0xFF000000);
+        hcf();
+    }
+    serial_write("[initrd] addr="); serial_write_hex64((uint64_t)initrd_ptr); serial_write(", size="); serial_write_hex64(initrd_sz); serial_write("\n");
+    vfs_init();
+    vfs_mount_cpio_newc(initrd_ptr, (size_t)initrd_sz);
+    serial_write("[vfs] mounted cpio newc\n");
+
+    /* Collecte des frames dans animations/ triées lexicographiquement */
+    const struct vfs_node **frames = 0; size_t frames_count = vfs_find_prefix("animations/", &frames);
+    serial_write("[vfs] frames_count="); serial_write_hex64((uint64_t)frames_count); serial_write("\n");
+    if (frames_count == 0 || !frames) {
         fb_clear(fb_ptr, fb->width, fb->height, fb->pitch, 0xFF000000);
         hcf();
     }
 
     /* Scheduler and threads */
     sched_init();
+    threads_configure_animation(frames, frames_count, fb);
+    (void)sched_create(thread_anim, "anim");
     (void)sched_create(thread_log, "log");
     (void)sched_create(thread_idle, "idle");
 
-    uint64_t next_ms = timer_ticks_ms();
-    for (;;) {
-        for (unsigned int i = 0; i < ANIM_FRAMES_COUNT; i++) {
-            const unsigned char *p = ANIM_FRAMES[i];
-            int sz = (int)ANIM_FRAME_SIZES[i];
-            if (sz < 18) continue;
-
-            uint16_t w = (uint16_t)(p[12] | (p[13]<<8));
-            uint16_t h = (uint16_t)(p[14] | (p[15]<<8));
-
-            uint32_t dx = 0, dy = 0;
-            if (fb->width  > w) dx = (fb->width  - w) / 2;
-            if (fb->height > h) dy = (fb->height - h) / 2;
-
-            /* pas de flash noir à chaque frame -> commente si tu veux un clear */
-            // fb_clear(fb_ptr, fb->width, fb->height, fb->pitch, 0xFF000000);
-
-            bool ok = tga_blit_to_fb_from_memory(p, sz, fb_ptr, fb->width, fb->height, fb->pitch, dx, dy);
-            if (!ok) {
-                /* frame non supportée (probable RLE) -> on la saute */
-                continue;
-            }
-
-            /* 30 FPS pacing via PIT ticks (33ms) */
-            next_ms += 33;
-            while (timer_ticks_ms() < next_ms) {
-                __asm__ __volatile__("hlt");
-            }
-        }
-    }
+    /* Let the scheduler run; this thread will be preempted */
+    for (;;) { __asm__ __volatile__("hlt"); }
 }

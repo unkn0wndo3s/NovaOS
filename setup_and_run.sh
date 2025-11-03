@@ -15,7 +15,7 @@ echo "[*] Vérif/installation dépendances système"
 if command -v apt >/dev/null 2>&1; then
   sudo apt update -y
   sudo apt install -y build-essential make bison flex libgmp3-dev libmpfr-dev libmpc-dev texinfo \
-                      qemu-system-x86 xorriso nasm git xxd
+                      qemu-system-x86 xorriso nasm git xxd cpio
 else
   echo "Apt non détecté. Installe équivalents (incluant xxd)."
 fi
@@ -51,54 +51,21 @@ if ! command -v "${TARGET}-gcc" >/dev/null 2>&1; then
   make install-target-libgcc
 fi
 
-# ---------- Génération anim_data.c ----------
+# ---------- Init ----------
 cd "$(dirname "$0")"
-echo "[*] Génération src/anim_data.c depuis animations/(images_*.tga|image-*.tga)"
 
-mkdir -p src
-TMP=src/anim_data.c
-{
-  echo '#include <stdint.h>'
-  echo '__attribute__((used)) const unsigned int ANIM_FRAMES_COUNT = 0;'
-  echo '__attribute__((used)) const unsigned char *ANIM_FRAMES[] = { };'
-  echo '__attribute__((used)) const unsigned int ANIM_FRAME_SIZES[] = { };'
-} > "$TMP"
-
-# Motifs acceptés et tri naturel
-shopt -s nullglob
-frames=(animations/images_*.tga animations/image-*.tga)
-if ((${#frames[@]})); then
-  mapfile -t FILES < <(printf '%s\n' "${frames[@]}" | LC_ALL=C sort -V)
-
-  echo '#include <stdint.h>' > "$TMP"
-  SYMS_DATA=()
-  SYMS_SIZE=()
-  i=0
-  for f in "${FILES[@]}"; do
-    sym="ANIM_IMG_${i}"
-    # Génère le tableau const et ajoute une constante de compile
-    xxd -i -n "$sym" "$f" \
-      | sed -E '/^unsigned int .*_len =/d;s/^unsigned char /const unsigned char /' >> "$TMP"
-    echo "enum { ${sym}_len = sizeof(${sym}) };" >> "$TMP"
-
-    SYMS_DATA+=("${sym}")
-    SYMS_SIZE+=("${sym}_len")
-    i=$((i+1))
-  done
-
-  echo "__attribute__((used)) const unsigned int ANIM_FRAMES_COUNT = ${#SYMS_DATA[@]};" >> "$TMP"
-
-  echo "__attribute__((used)) const unsigned char *ANIM_FRAMES[] = {" >> "$TMP"
-  for s in "${SYMS_DATA[@]}"; do echo "  ${s}," >> "$TMP"; done
-  echo "};" >> "$TMP"
-
-  echo "__attribute__((used)) const unsigned int ANIM_FRAME_SIZES[] = {" >> "$TMP"
-  for s in "${SYMS_SIZE[@]}"; do echo "  ${s}," >> "$TMP"; done
-  echo "};" >> "$TMP"
-
-  echo "[*] ${#SYMS_DATA[@]} frame(s) intégrée(s) dans src/anim_data.c"
+# ---------- Construire initrd.cpio ----------
+echo "[*] Construction initrd.cpio depuis animations/*.tga"
+mkdir -p animations
+if compgen -G 'animations/*.tga' > /dev/null; then
+  # Archive newc, tri naturel, noms NUL-terminés
+  find animations -maxdepth 1 -type f -name '*.tga' -print0 \
+    | LC_ALL=C sort -z -V \
+    | cpio --null -o -H newc --reproducible > initrd.cpio
+  echo "[*] initrd.cpio généré avec les frames de animations/"
 else
-  echo "[!] Aucune frame trouvée. Place des .tga dans animations/ (images_*.tga ou image-*.tga)."
+  echo "[!] Aucune frame .tga trouvée. initrd.cpio contiendra seulement le répertoire animations/"
+  printf 'animations/\0' | cpio --null -o -H newc --reproducible > initrd.cpio
 fi
 
 # ---------- Build kernel ----------
@@ -122,6 +89,7 @@ cp -v limine.conf limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine
 mkdir -p iso_root/EFI/BOOT
 cp -v limine/BOOTX64.EFI iso_root/EFI/BOOT/
 cp -v limine/BOOTIA32.EFI iso_root/EFI/BOOT/
+cp -v initrd.cpio iso_root/
 
 xorriso -as mkisofs -R -r -J -b boot/limine/limine-bios-cd.bin \
   -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
@@ -133,4 +101,4 @@ xorriso -as mkisofs -R -r -J -b boot/limine/limine-bios-cd.bin \
 
 # ---------- Run QEMU ----------
 echo "[*] Lancement QEMU"
-exec qemu-system-x86_64 -cdrom image.iso
+exec qemu-system-x86_64 -cdrom image.iso -serial stdio
