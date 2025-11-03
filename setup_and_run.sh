@@ -55,18 +55,50 @@ fi
 cd "$(dirname "$0")"
 
 # ---------- Construire initrd.cpio ----------
-echo "[*] Construction initrd.cpio depuis animations/*.tga"
+echo "[*] Construction initrd.cpio (animations/ + /bin /etc /home)"
+rm -rf initrd_root || true
+mkdir -p initrd_root/animations initrd_root/bin initrd_root/etc initrd_root/home
+
+# Copier animations
 mkdir -p animations
 if compgen -G 'animations/*.tga' > /dev/null; then
-  # Archive newc, tri naturel, noms NUL-terminés
-  find animations -maxdepth 1 -type f -name '*.tga' -print0 \
-    | LC_ALL=C sort -z -V \
-    | cpio --null -o -H newc --reproducible > initrd.cpio
-  echo "[*] initrd.cpio généré avec les frames de animations/"
-else
-  echo "[!] Aucune frame .tga trouvée. initrd.cpio contiendra seulement le répertoire animations/"
-  printf 'animations/\0' | cpio --null -o -H newc --reproducible > initrd.cpio
+  cp -a animations/*.tga initrd_root/animations/ 2>/dev/null || true
 fi
+
+# Générer /etc/passwd et /etc/shadow simples si absents
+if [ ! -f initrd_root/etc/passwd ]; then
+  cat > initrd_root/etc/passwd <<'EOF'
+root:x:0:0:root:/root:/bin/sh
+user:x:1000:1000:user:/home/user:/bin/sh
+EOF
+fi
+
+if [ ! -f initrd_root/etc/shadow ]; then
+  SALT=$(head -c 8 /dev/urandom | xxd -p 2>/dev/null || echo "somesalt")
+  # mot de passe par défaut: nova
+  HASH=$(printf "%s" "${SALT}nova" | sha256sum | awk '{print $1}')
+  cat > initrd_root/etc/shadow <<EOF
+root:${HASH}:${SALT}:0:0:0:0
+user:${HASH}:${SALT}:0:0:0:0
+EOF
+fi
+
+# Construire /bin/init utilisateur minimal (NASM)
+if [ -f userland/init.asm ]; then
+  echo "[*] Build userland /bin/init"
+  nasm -f elf64 -g -F dwarf userland/init.asm -o userland/init.o
+  ld -m elf_x86_64 -nostdlib -static -T userland/link.ld userland/init.o -o userland/init
+  cp -v userland/init initrd_root/bin/init
+fi
+
+# Construire archive CPIO newc avec NUL terminators
+(
+  cd initrd_root
+  { find . -type d -print0; find . -type f -print0; } \
+    | LC_ALL=C sort -z \
+    | cpio --null -o -H newc --reproducible
+) > initrd.cpio
+echo "[*] initrd.cpio généré"
 
 # ---------- Build kernel ----------
 echo "[*] Build kernel (myos)"

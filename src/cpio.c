@@ -19,7 +19,10 @@ int cpio_newc_foreach_file(const void *base, size_t size, cpio_file_cb cb, void 
         if (!(h[0]=='0' && h[1]=='7' && h[2]=='0' && h[3]=='7' && h[4]=='0' && (h[5]=='1' || h[5]=='2'))) {
             return 0; /* bad magic */
         }
+        uint32_t inode     = (uint32_t)parse_hex32(h+6, 8);
         uint32_t mode      = (uint32_t)parse_hex32(h+14, 8);
+        uint32_t uid       = (uint32_t)parse_hex32(h+22, 8);
+        uint32_t gid       = (uint32_t)parse_hex32(h+30, 8);
         uint64_t filesize  =           parse_hex64(h+54, 8);
         uint32_t namesize  = (uint32_t)parse_hex32(h+94, 8);
 
@@ -49,7 +52,8 @@ int cpio_newc_foreach_file(const void *base, size_t size, cpio_file_cb cb, void 
                 const char *normalized = name;
                 if (normalized[0]=='.' && normalized[1]=='/') normalized += 2;
                 /* Build a clean C-string for path (namesize includes NUL) */
-                cb(normalized, p, (size_t)filesize, user);
+                (void)inode;
+                cb(normalized, p, (size_t)filesize, mode, uid, gid, user);
             }
         }
 

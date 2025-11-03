@@ -145,3 +145,41 @@ ISR_NOERR 31
 /* Hardware IRQs we care about now */
 IRQ_NOERR 32
 IRQ_NOERR 33
+
+/* ------------------------- SYSCALL entry ------------------------- */
+.global syscall_entry
+.extern syscall_handle
+.extern syscall_stack_top
+
+syscall_entry:
+    /* Switch to kernel context and stack; store user RSP */
+    swapgs
+    mov %rsp, %r12                    /* save user RSP */
+    lea syscall_stack_top(%rip), %rsp
+    mov (%rsp), %rsp                  /* load kernel syscall stack top */
+
+    /* Save user return state */
+    pushq %rcx                        /* user RIP */
+    pushq %r11                        /* user RFLAGS */
+    pushq %r12                        /* user RSP */
+
+    /* Prepare arguments for syscall_handle */
+    pushq %r9                         /* stack arg: arg5 */
+    mov %r8, %r9                      /* arg4 in r9 */
+    mov %r10, %r8                     /* arg3 in r8 */
+    mov %rdx, %rcx                    /* arg2 in rcx */
+    mov %rsi, %rdx                    /* arg1 in rdx */
+    mov %rdi, %rsi                    /* arg0 in rsi */
+    mov %rax, %rdi                    /* num  in rdi */
+
+    call syscall_handle
+
+    add $8, %rsp                      /* pop arg5 */
+
+    /* Restore and return to user */
+    pop %r12                          /* user RSP */
+    pop %r11                          /* user RFLAGS */
+    pop %rcx                          /* user RIP */
+    mov %r12, %rsp
+    swapgs
+    sysretq

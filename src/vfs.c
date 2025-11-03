@@ -14,12 +14,15 @@ static int str_cmp(const char *a, const char *b){ if(!a||!b) return (a==b)?0:(a?
 static int str_startswith(const char *s, const char *p){ size_t i=0; if(!s||!p) return 0; for(; p[i]; i++){ if(s[i]!=p[i]) return 0; } return 1; }
 static char *str_dup(const char *s){ size_t n=str_len(s); char *d=(char*)kmalloc(n+1); if(!d) return 0; for(size_t i=0;i<=n;i++) d[i]=s[i]; return d; }
 
-static void vfs_add_file(const char *path, const void *data, size_t size){
+static void vfs_add_file(const char *path, const void *data, size_t size, uint32_t mode, uint32_t uid, uint32_t gid){
     struct vfs_node *node = (struct vfs_node*)kmalloc(sizeof(*node));
     if (!node) return;
     node->path = str_dup(path);
     node->data = (const uint8_t*)data;
     node->size = size;
+    node->mode = mode;
+    node->uid = uid;
+    node->gid = gid;
     serial_write("[vfs] add "); serial_write(node->path); serial_write(" (size="); serial_write_hex64((uint64_t)size); serial_write(")\n");
     if (vfs_nodes_count == vfs_nodes_cap) {
         size_t new_cap = vfs_nodes_cap ? (vfs_nodes_cap * 2) : 16;
@@ -32,14 +35,14 @@ static void vfs_add_file(const char *path, const void *data, size_t size){
     vfs_nodes[vfs_nodes_count++] = node;
 }
 
-static void cpio_collect(const char *path, const void *data, size_t size, void *user){
+static void cpio_collect(const char *path, const void *data, size_t size, uint32_t mode, uint32_t uid, uint32_t gid, void *user){
     (void)user;
     /* Skip directories and special names handled by parser already. */
     if (!path || !*path) return;
     /* Skip trailing slash names */
     size_t n = str_len(path);
     if (n && path[n-1] == '/') return;
-    vfs_add_file(path, data, size);
+    vfs_add_file(path, data, size, mode, uid, gid);
 }
 
 void vfs_init(void){

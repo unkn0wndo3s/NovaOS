@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "../arch/x86_64/io.h"
 #include "serial.h"
+#include "tty.h"
 
 #define PS2_DATA 0x60
 #define PS2_STAT 0x64
@@ -41,10 +42,7 @@ void keyboard_irq1(void) {
         char ch = 0;
         if (sc < sizeof(scancode_set1_us)) ch = scancode_set1_us[sc];
         if (ch) ch = map_fr(ch, shift_active);
-        if (ch) {
-            char s[2] = { ch, 0 };
-            serial_write(s);
-        }
+        if (ch) tty_put_key(ch);
     }
 }
 

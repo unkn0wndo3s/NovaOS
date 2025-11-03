@@ -6,6 +6,9 @@ struct vfs_node {
     const char *path;           /* NUL-terminated path (owned by VFS) */
     const uint8_t *data;        /* Points into initrd memory */
     size_t size;
+    uint32_t mode;              /* POSIX mode bits */
+    uint32_t uid;               /* owner uid */
+    uint32_t gid;               /* owner gid */
 };
 
 void vfs_init(void);

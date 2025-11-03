@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "segments.h"
 
 static struct idt_entry idt[256];
 static struct idt_ptr idtr;
@@ -41,7 +42,7 @@ extern void irq_stub_33(void);
 static void set_gate(int n, void *isr, uint8_t type_attr) {
     uint64_t off = (uint64_t)isr;
     idt[n].offset_low = (uint16_t)(off & 0xFFFF);
-    idt[n].selector = 0x28; /* kernel code selector set by Limine */
+    idt[n].selector = GDT_SEL_KERNEL_CS; /* kernel code selector */
     idt[n].ist = 0;
     idt[n].type_attr = type_attr; /* present, DPL=0, type=0xE */
     idt[n].offset_mid = (uint16_t)((off >> 16) & 0xFFFF);
@@ -52,7 +53,7 @@ static void set_gate(int n, void *isr, uint8_t type_attr) {
 void idt_init(void) {
     for (int i = 0; i < 256; i++) {
         idt[i].offset_low = 0;
-        idt[i].selector = 0x28;
+        idt[i].selector = GDT_SEL_KERNEL_CS;
         idt[i].ist = 0;
         idt[i].type_attr = 0x8E; /* present interrupt gate */
         idt[i].offset_mid = 0;
