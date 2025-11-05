@@ -47,6 +47,15 @@ static void build_initial_user_stack(uint64_t pml4_phys, uint64_t stack_top, con
 void proc_spawn_init_from_vfs(void) {
     const struct vfs_node *node = vfs_get("/bin/init");
     if (!node) node = vfs_get("bin/init");
+    if (!node) node = vfs_get("init");
+    if (!node) {
+        /* Debug: list bin/ entries to help diagnose path mismatch */
+        const struct vfs_node **list = 0; size_t cnt = vfs_find_prefix("/bin/", &list);
+        serial_write("[proc] bin/ entries: "); serial_write_hex64((uint64_t)cnt); serial_write("\n");
+        for (size_t i = 0; i < cnt; i++) {
+            serial_write("  - "); serial_write(list[i]->path); serial_write(" (size="); serial_write_hex64((uint64_t)list[i]->size); serial_write(")\n");
+        }
+    }
 	if (!node) {
 		serial_write("[proc] /bin/init not found; skipping userland\n");
 		return;

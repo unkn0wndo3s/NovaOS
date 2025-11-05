@@ -77,7 +77,10 @@ void kmain(void) {
     proc_spawn_init_from_vfs();
 
     /* Collecte des frames dans animations/ triées lexicographiquement */
-    const struct vfs_node **frames = 0; size_t frames_count = vfs_find_prefix("animations/", &frames);
+    const struct vfs_node **frames = 0; size_t frames_count = vfs_find_prefix("/animations/", &frames);
+    if (frames_count == 0 || !frames) {
+        frames_count = vfs_find_prefix("animations/", &frames);
+    }
     serial_write("[vfs] frames_count="); serial_write_hex64((uint64_t)frames_count); serial_write("\n");
     if (frames_count == 0 || !frames) {
         fb_clear(fb_ptr, fb->width, fb->height, fb->pitch, 0xFF000000);

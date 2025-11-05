@@ -51,9 +51,17 @@ int cpio_newc_foreach_file(const void *base, size_t size, cpio_file_cb cb, void 
                 /* Normalize leading "./" if present */
                 const char *normalized = name;
                 if (normalized[0]=='.' && normalized[1]=='/') normalized += 2;
-                /* Build a clean C-string for path (namesize includes NUL) */
+                /* Ensure leading slash so paths are like "/bin/init" */
+                size_t nlen = 0; while (normalized[nlen] && (normalized + nlen) < end) nlen++;
+                /* +2 for potential leading '/' and trailing NUL */
+                char tmp_path_local[4096];
+                size_t idx = 0;
+                if (nlen + 2 >= sizeof(tmp_path_local)) return 0; /* path too long */
+                if (normalized[0] != '/') tmp_path_local[idx++] = '/';
+                for (size_t k = 0; k < nlen; k++) tmp_path_local[idx++] = normalized[k];
+                tmp_path_local[idx] = '\0';
                 (void)inode;
-                cb(normalized, p, (size_t)filesize, mode, uid, gid, user);
+                cb(tmp_path_local, p, (size_t)filesize, mode, uid, gid, user);
             }
         }
 
