@@ -26,6 +26,8 @@
 %define LONG_MODE_STACK   (BOOT_VIRT_BASE + BOOT_MAP_SIZE - 0x10)
 %define UEFI_UTF16_BUFFER_LEN 256
 %define BIOS_E820_ENTRY_SIZE    24
+%define MAX_BIOS_DISKS   16
+%define SERIAL_PORT      0x3F8
 
 %define ACPI_RSDP_MIN_LEN     20
 %define ACPI_RSDP_COPY_LEN    36
@@ -67,6 +69,11 @@
 
 %define STAGE2_ABS(addr) ((addr) + STAGE2_LINEAR_BASE)
 %define PROT_STACK_PTR   (PROT_STACK_TOP - STAGE2_LINEAR_BASE)
+%define BOOTINFO_MAX_DISKS        16
+%define BOOTINFO_DISK_ENTRY_SIZE  32
+%define BOOTINFO_DISK_IF_BIOS     0
+%define BOOTINFO_DISK_IF_UEFI     1
+%define BOOTINFO_DISK_FLAG_EDD    0x0001
 
 %define BOOTINFO_SIGNATURE 0x42494E46 ; 'BINF'
 %define BOOTINFO_FLAG_SMBIOS   (1 << 0)
@@ -93,10 +100,13 @@ stage2_entry:
     mov es, ax
 
     cld
+    call serial_init
     call firmware_init_rm
     call memmap_reset_raw
     call memmap_collect_rm
+    call bios_collect_disks
     mov si, stage2_real_mode_msg
+    call debug_out_rm
     call fw_console_write_rm
 
     cli
@@ -189,6 +199,49 @@ memmap_collect_rm:
     je bios_collect_e820
     ret
 
+bios_collect_disks:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov dl, 0x80
+    mov cx, MAX_BIOS_DISKS
+.bios_disk_loop:
+    cmp cx, 0
+    je .bios_disk_done
+    mov word [bios_disk_packet], 0x001E
+    mov word [bios_disk_packet + 2], 0
+    mov bx, 0x55AA
+    mov ah, 0x41
+    int 0x13
+    jc .disk_next
+    cmp bx, 0xAA55
+    jne .disk_next
+    mov si, bios_disk_packet
+    mov ah, 0x48
+    int 0x13
+    jc .disk_next
+    push cx
+    push dx
+    call bootinfo_store_bios_disk
+    pop dx
+    pop cx
+.disk_next:
+    inc dl
+    dec cx
+    jnz .bios_disk_loop
+.bios_disk_done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 bios_collect_e820:
     push ax
     push bx
@@ -263,6 +316,122 @@ bios_store_e820_entry:
     pop ax
     ret
 
+bios_disk_packet:
+    dw 0x001E
+    dw 0
+    dd 0
+    dd 0
+    dd 0
+    dq 0
+    dw 0
+    dw 0
+
+serial_init:
+    push ax
+    push dx
+    mov dx, SERIAL_PORT + 1
+    xor ax, ax
+    out dx, al
+    mov dx, SERIAL_PORT + 3
+    mov al, 0x80
+    out dx, al
+    mov dx, SERIAL_PORT + 0
+    mov al, 0x01
+    out dx, al
+    mov dx, SERIAL_PORT + 1
+    xor al, al
+    out dx, al
+    mov dx, SERIAL_PORT + 3
+    mov al, 0x03
+    out dx, al
+    mov dx, SERIAL_PORT + 2
+    mov al, 0xC7
+    out dx, al
+    mov dx, SERIAL_PORT + 4
+    mov al, 0x03
+    out dx, al
+    pop dx
+    pop ax
+    ret
+
+bootinfo_store_bios_disk:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov ax, [bootinfo_disk_count]
+    cmp ax, BOOTINFO_MAX_DISKS
+    jae .bios_store_done
+    mov bx, BOOTINFO_DISK_ENTRY_SIZE
+    mul bx
+    mov di, bootinfo_disks
+    add di, ax
+    mov byte [di + 0], BOOTINFO_DISK_IF_BIOS
+    mov byte [di + 1], dl
+    mov ax, [bios_disk_packet + 2]
+    or ax, BOOTINFO_DISK_FLAG_EDD
+    mov [di + 2], ax
+    mov word [di + 4], 0
+    mov word [di + 6], 0
+    mov word [di + 8], 0
+    mov word [di + 10], 0
+    mov ax, [bios_disk_packet + 16]
+    mov [di + 12], ax
+    mov ax, [bios_disk_packet + 18]
+    mov [di + 14], ax
+    mov ax, [bios_disk_packet + 20]
+    mov [di + 16], ax
+    mov ax, [bios_disk_packet + 22]
+    mov [di + 18], ax
+    mov ax, [bios_disk_packet + 24]
+    mov [di + 20], ax
+    mov word [di + 22], 0
+    mov word [di + 24], 0
+    mov word [di + 26], 0
+    mov word [di + 28], 0
+    mov word [di + 30], 0
+    mov ax, [bootinfo_disk_count]
+    inc ax
+    mov [bootinfo_disk_count], ax
+    mov word [bootinfo_disk_count + 2], 0
+.bios_store_done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+debug_out_rm:
+    push ax
+    push dx
+    push bx
+    push di
+    mov di, si
+.rm_loop:
+    mov bl, [di]
+    test bl, bl
+    jz .rm_done
+    mov dx, SERIAL_PORT + 5
+.rm_wait:
+    in al, dx
+    test al, 0x20
+    jz .rm_wait
+    mov dx, SERIAL_PORT
+    mov al, bl
+    out dx, al
+    inc di
+    jmp .rm_loop
+.rm_done:
+    pop di
+    pop bx
+    pop dx
+    pop ax
+    ret
+
 [bits 32]
 protected_mode_entry:
     mov ax, DATA_SELECTOR
@@ -281,6 +450,7 @@ protected_mode_entry:
     call acpi_collect_tables
     call smp_collect_cpu_info
     call bootinfo_collect_smbios
+    call bootinfo_collect_uefi_disks
     call bootinfo_finalize
 
     mov esi, pmode_message
@@ -420,6 +590,7 @@ enter_long_mode:
 
 fw_console_write_pm:
     pushad
+    call debug_out_pm
     cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
     je .bios
     cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
@@ -432,6 +603,33 @@ fw_console_write_pm:
     jmp .done
 .done:
     popad
+    ret
+
+debug_out_pm:
+    push eax
+    push ebx
+    push edx
+    push edi
+    mov edi, esi
+.dbg_pm_loop:
+    mov bl, [edi]
+    test bl, bl
+    jz .dbg_pm_done
+    mov dx, SERIAL_PORT + 5
+.dbg_pm_wait:
+    in al, dx
+    test al, 0x20
+    jz .dbg_pm_wait
+    mov dx, SERIAL_PORT
+    mov al, bl
+    out dx, al
+    inc edi
+    jmp .dbg_pm_loop
+.dbg_pm_done:
+    pop edi
+    pop edx
+    pop ebx
+    pop eax
     ret
 
 console_write_vga32:
@@ -691,10 +889,6 @@ memmap_append_entry:
 
 bootinfo_init:
     pushad
-    mov edi, bootinfo_struct
-    mov ecx, (bootinfo_end - bootinfo_struct) / 4
-    xor eax, eax
-    rep stosd
     mov dword [bootinfo_signature], BOOTINFO_SIGNATURE
     mov eax, bootinfo_end - bootinfo_struct
     mov [bootinfo_length], eax
@@ -794,6 +988,41 @@ bootinfo_collect_smbios:
 .next:
     add esi, 16
     jmp .scan_loop
+.done:
+    popad
+    ret
+
+bootinfo_collect_uefi_disks:
+    pushad
+    cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
+    jne .done
+    mov esi, [uefi_disk_list_ptr]
+    test esi, esi
+    je .done
+    mov ecx, [esi]
+    mov ebx, [esi + 4]
+    add esi, 8
+    cmp ebx, BOOTINFO_DISK_ENTRY_SIZE
+    jb .done
+.disk_loop:
+    cmp ecx, 0
+    je .done
+    mov eax, [bootinfo_disk_count]
+    cmp eax, BOOTINFO_MAX_DISKS
+    jae .done
+    mov edx, BOOTINFO_DISK_ENTRY_SIZE
+    mul edx
+    mov edi, bootinfo_disks
+    add edi, eax
+    push ecx
+    mov ecx, BOOTINFO_DISK_ENTRY_SIZE / 4
+    rep movsd
+    pop ecx
+    mov eax, [bootinfo_disk_count]
+    inc eax
+    mov [bootinfo_disk_count], eax
+    dec ecx
+    jmp .disk_loop
 .done:
     popad
     ret
@@ -1379,6 +1608,8 @@ bootinfo_cpu_max_ext:    dd 0
 bootinfo_cpu_core_count: dd 0
 bootinfo_smbios_phys:    dd 0
 bootinfo_smbios_len:     dd 0
+bootinfo_disk_count:     dd 0
+bootinfo_disks:          times (BOOTINFO_MAX_DISKS * (BOOTINFO_DISK_ENTRY_SIZE / 4)) dd 0
 bootinfo_reserved:       times 8 dd 0
 bootinfo_end:
 bootinfo_ptr:            dd bootinfo_struct
@@ -1406,6 +1637,7 @@ uefi_memmap_ptr:       dq 0
 uefi_memmap_size:      dq 0
 uefi_memdesc_size:     dd 0
 uefi_memdesc_version:  dd 0
+uefi_disk_list_ptr:     dq 0
 uefi_utf16_buffer:     times UEFI_UTF16_BUFFER_LEN dw 0
 
 [bits 64]
@@ -1451,6 +1683,7 @@ fw_console_write_lm:
     push rbx
     push rdi
     push rsi
+    call debug_out_lm
     cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
     je .bios
     cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
@@ -1513,6 +1746,33 @@ ascii_to_utf16:
     pop rbx
     ret
 
+debug_out_lm:
+    push rax
+    push rbx
+    push rdx
+    push rdi
+    mov rdi, rsi
+.dbg_lm_loop:
+    mov bl, [rdi]
+    test bl, bl
+    jz .dbg_lm_done
+    mov dx, SERIAL_PORT + 5
+.dbg_lm_wait:
+    in al, dx
+    test al, 0x20
+    jz .dbg_lm_wait
+    mov dx, SERIAL_PORT
+    mov al, bl
+    out dx, al
+    inc rdi
+    jmp .dbg_lm_loop
+.dbg_lm_done:
+    pop rdi
+    pop rdx
+    pop rbx
+    pop rax
+    ret
+
 firmware_install_uefi:
     ; RDI points to a NovaFirmwareContext structure populated by the UEFI stub.
     test rdi, rdi
@@ -1538,6 +1798,8 @@ firmware_install_uefi:
     mov [uefi_memdesc_size], eax
     mov eax, dword [rdi + NOVA_FW_CTX_MEMDESC_VERSION]
     mov [uefi_memdesc_version], eax
+    mov rax, [rdi + NOVA_FW_CTX_DISK_LIST_PTR]
+    mov [uefi_disk_list_ptr], rax
     mov rax, [rdi + NOVA_FW_CTX_RSDP_PTR]
     mov [acpi_rsdp_phys], rax
     test rax, rax

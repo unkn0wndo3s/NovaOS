@@ -19,8 +19,9 @@
 %define NOVA_FW_CTX_MEMDESC_SIZE     56
 %define NOVA_FW_CTX_MEMDESC_VERSION  60
 %define NOVA_FW_CTX_RSDP_PTR         64
-%define NOVA_FW_CTX_RESERVED0        72
-%define NOVA_FW_CTX_TOTAL_SIZE       80
+%define NOVA_FW_CTX_DISK_LIST_PTR    72
+%define NOVA_FW_CTX_RESERVED0        80
+%define NOVA_FW_CTX_TOTAL_SIZE       88
 
 ; Normalized memory map constants
 %define NOVA_MEM_SIGNATURE       0x4E4D4D50 ; 'NMMP'

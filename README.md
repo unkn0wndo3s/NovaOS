@@ -80,6 +80,7 @@ The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if re
   - Collects the system memory map: BIOS builds a raw E820 table in real mode, while UEFI shims can inject their firmware memory map via the shared `NovaFirmwareContext`. In protected mode the loader normalizes every descriptor into a compact internal array (`memmap_header` + `memmap_entries`) so later stages see consistent types, lengths, and a truncation flag regardless of firmware.
   - Discovers ACPI: BIOS mode scans the EBDA and high BIOS area for the RSDP; UEFI mode may supply the pointer through `NovaFirmwareContext`. The loader validates the descriptor, captures the revision, and records the RSDT/XSDT physical addresses so the kernel can jump straight to ACPI tables.
   - Enumerates CPUs: once the ACPI tables are cached, Stage 2 parses the MADT entries (from either RSDT or XSDT) and records LAPIC IDs, BSP hints, and bitmaps for up to `NOVA_CPU_MAX_ENTRIES` logical processors. Overflow sets the `NOVA_ACPI_FLAG_CPU_LIMIT` flag so the kernel can warn about truncated topologies.
+- Enumerates disks: in BIOS mode real-mode INT 13h calls (`AH=48h`) probe up to 16 drives starting at `0x80`, recording EDD flags, geometry, and total sectors inside the BootInfo table. UEFI builds can pass a pre-populated disk list via the firmware context so the same table is available before the kernel starts.
   - Builds a `BootInfo` hardware summary that accompanies the memory/CPU tables. CPUID is used to capture the vendor string, maximum leaf, feature flags, and (if available) the full brand string; the final CPU count is copied from the SMP enumeration. A SMBIOS entry-point scan (`0xF0000-0xFFFFF`) records table length and physical address when an `_SM_` anchor is present.
   - This is the natural place to add A20 enable logic, paging, and kernel loading.
 
@@ -102,7 +103,7 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
   - `fw_console_write_rm` (real mode) — BIOS backend implements INT 10h, UEFI backend currently falls back to VGA for diagnostics.
   - `fw_console_write_pm` (32-bit) — used during paging/GDT setup; BIOS backend writes to VGA memory, UEFI backend defers to VGA until the handoff switches contexts.
   - `fw_console_write_lm` (64-bit) — BIOS backend keeps writing to the text buffer, while the UEFI backend calls `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString` if the context block provided a pointer.
-- UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, image handle, memory-map, and RSDP pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O, ACPI, CPU topology, and other services follow the same pattern without touching the high-level loaders.
+- UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, image handle, memory-map, RSDP, and disk-list pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O, ACPI, CPU topology, and other services follow the same pattern without touching the high-level loaders.
 
 ## Memory Map
 
@@ -144,6 +145,10 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
   - The loader scans the BIOS window for the `_SM_` anchor. When a valid checksum is found, `bootinfo_smbios_phys` and `bootinfo_smbios_len` capture the table location and reported length while `BOOTINFO_FLAG_SMBIOS` is raised.
   - These pointers are raw physical addresses (identity-mapped under 2 MiB) so the kernel can immediately parse SMBIOS without rescan.
 - Future hardware summaries (PCI, EC, etc.) can extend the structure; the size/version fields let later kernels detect new additions safely.
+- Disk fields:
+  - `bootinfo_disk_count` caps at `BOOTINFO_MAX_DISKS` (currently 16). Each entry in `bootinfo_disks` is 32 bytes: `{iface (0=BIOS,1=UEFI), drive_id, flags, handle[63:0], total_sectors[63:0], bytes_per_sector, reserved}`.
+  - BIOS enumeration issues INT 13h `AH=48h` requests for drives `0x80`..`0x80+MAX_BIOS_DISKS`. When successful, the returned EDD info/bytes-per-sector land in the BootInfo entry with `BOOTINFO_DISK_FLAG_EDD` set.
+  - UEFI loaders can supply their own disk list inside the firmware context (the pointer at `DISK_LIST_PTR` should reference `{count,u32 entry_size, entries[]}` where each entry already matches the BootInfo layout). Stage 2 copies those entries directly after the BIOS ones.
 
 ## Contribution Rules
 
