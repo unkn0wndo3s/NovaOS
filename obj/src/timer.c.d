@@ -1,2 +1,0 @@
-obj/src/timer.c.o: src/timer.c src/../arch/x86_64/io.h
-src/../arch/x86_64/io.h:
