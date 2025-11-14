@@ -63,6 +63,19 @@
 %define ACPI_SIG_APIC   ACPI_SIG_MADT
 %define ACPI_TABLE_BUFFER_SIZE 4096
 %define CPU_ENTRY_SIZE  16
+%define ERROR_VECTOR_COUNT 7
+
+%define STAGE2_ABS(addr) ((addr) + STAGE2_LINEAR_BASE)
+%define PROT_STACK_PTR   (PROT_STACK_TOP - STAGE2_LINEAR_BASE)
+
+%macro GDT_ENTRY 4
+    dw (%1 & 0xFFFF)
+    dw (%2 & 0xFFFF)
+    db ((%2 >> 16) & 0xFF)
+    db %3
+    db (((%1 >> 16) & 0x0F) | ((%4 & 0x0F) << 4))
+    db ((%2 >> 24) & 0xFF)
+%endmacro
 
 stage2_entry:
     cli
@@ -82,6 +95,29 @@ stage2_entry:
     mov si, stage2_real_mode_msg
     call fw_console_write_rm
 
+    cli
+    mov al, 0x11
+    out 0x20, al
+    out 0xA0, al
+    mov al, 0x20
+    out 0x21, al
+    mov al, 0x28
+    out 0xA1, al
+    mov al, 0x04
+    out 0x21, al
+    mov al, 0x02
+    out 0xA1, al
+    mov al, 0x01
+    out 0x21, al
+    out 0xA1, al
+    mov al, 0xFF
+    out 0x21, al
+    out 0xA1, al
+
+    in al, 0x70
+    or al, 0x80
+    out 0x70, al
+
     ; Copy the GDT template into low memory (0x0000:0x0500)
     mov si, gdt_start
     xor ax, ax
@@ -99,7 +135,7 @@ stage2_entry:
     or eax, 0x1
     mov cr0, eax
 
-    jmp CODE32_SELECTOR:protected_mode_entry
+    jmp dword CODE32_SELECTOR:protected_mode_entry
 
 firmware_init_rm:
     mov byte [firmware_kind], FIRMWARE_KIND_BIOS
@@ -231,14 +267,15 @@ protected_mode_entry:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, PROT_STACK_TOP
+    mov esp, PROT_STACK_PTR
 
+    call init_idt
     call setup_paging
     call memmap_build_normalized
     call acpi_collect_tables
     call smp_collect_cpu_info
 
-    mov esi, STAGE2_LINEAR_BASE + pmode_message
+    mov esi, pmode_message
     call fw_console_write_pm
 
     call enter_long_mode
@@ -251,13 +288,13 @@ setup_paging:
     pushad
 
     ; Clear paging structures
-    mov edi, STAGE2_LINEAR_BASE + page_tables_start
+    mov edi, page_tables_start
     mov ecx, (page_tables_end - page_tables_start) / 4
     xor eax, eax
     rep stosd
 
     ; PML4 entries
-    mov edi, STAGE2_LINEAR_BASE + pml4_table
+    mov edi, pml4_table
     mov eax, STAGE2_PHYS_BASE + pdpt_low
     or eax, PAGE_FLAGS
     mov [edi + (0 * 8)], eax
@@ -273,13 +310,13 @@ setup_paging:
 %endif
 
     ; PDPT entries
-    mov edi, STAGE2_LINEAR_BASE + pdpt_low
+    mov edi, pdpt_low
     mov eax, STAGE2_PHYS_BASE + pd_low
     or eax, PAGE_FLAGS
     mov [edi + (0 * 8)], eax
     mov dword [edi + (0 * 8) + 4], 0
 
-    mov edi, STAGE2_LINEAR_BASE + pdpt_high
+    mov edi, pdpt_high
     mov eax, STAGE2_PHYS_BASE + pd_high
     or eax, PAGE_FLAGS
     mov [edi + (KERNEL_PDPT_INDEX * 8)], eax
@@ -290,13 +327,13 @@ setup_paging:
 %endif
 
     ; PD entries
-    mov edi, STAGE2_LINEAR_BASE + pd_low
+    mov edi, pd_low
     mov eax, STAGE2_PHYS_BASE + pt_identity
     or eax, PAGE_FLAGS
     mov [edi + (0 * 8)], eax
     mov dword [edi + (0 * 8) + 4], 0
 
-    mov edi, STAGE2_LINEAR_BASE + pd_high
+    mov edi, pd_high
     mov eax, STAGE2_PHYS_BASE + pt_kernel
     or eax, PAGE_FLAGS
     mov [edi + (KERNEL_PD_INDEX * 8)], eax
@@ -308,7 +345,7 @@ setup_paging:
     mov dword [edi + (BOOT_PD_INDEX * 8) + 4], 0
 
     ; Identity PT entries
-    mov edi, STAGE2_LINEAR_BASE + pt_identity
+    mov edi, pt_identity
     mov ecx, IDENTITY_PAGE_COUNT
     xor ebx, ebx
 .identity_loop:
@@ -321,7 +358,7 @@ setup_paging:
     loop .identity_loop
 
     ; Kernel PT entries
-    mov edi, STAGE2_LINEAR_BASE + pt_kernel + (KERNEL_PT_INDEX * 8)
+    mov edi, pt_kernel + (KERNEL_PT_INDEX * 8)
     mov ecx, KERNEL_PAGE_COUNT
     mov ebx, KERNEL_PHYS_BASE
 .kernel_loop:
@@ -334,7 +371,7 @@ setup_paging:
     loop .kernel_loop
 
     ; Bootloader PT entries
-    mov edi, STAGE2_LINEAR_BASE + pt_boot + (BOOT_PT_INDEX * 8)
+    mov edi, pt_boot + (BOOT_PT_INDEX * 8)
     mov ecx, BOOT_PAGE_COUNT
     mov ebx, BOOT_PHYS_BASE
 .boot_loop:
@@ -371,7 +408,7 @@ enter_long_mode:
     or eax, CR0_PG
     mov cr0, eax
 
-    jmp CODE64_SELECTOR:STAGE2_LINEAR_BASE + long_mode_entry
+    jmp CODE64_SELECTOR:long_mode_entry
 
 fw_console_write_pm:
     pushad
@@ -430,7 +467,7 @@ memmap_reset_final:
     mov dword [memmap_entry_count], 0
     mov dword [memmap_source_kind], NOVA_MEM_SOURCE_NONE
 
-    mov edi, STAGE2_LINEAR_BASE + memmap_entries
+    mov edi, memmap_entries
     mov ecx, NOVA_MEM_MAX_ENTRIES * NOVA_MEM_ENTRY_DWORDS
     xor eax, eax
     rep stosd
@@ -440,7 +477,7 @@ memmap_build_from_bios:
     pushad
     mov dword [memmap_source_kind], NOVA_MEM_SOURCE_BIOS
     movzx ecx, word [bios_memmap_raw_count]
-    mov edi, STAGE2_LINEAR_BASE + bios_memmap_raw_entries
+    mov edi, bios_memmap_raw_entries
 .bios_loop:
     test ecx, ecx
     jz .bios_done
@@ -621,7 +658,7 @@ memmap_append_entry:
 .store:
     mov edx, NOVA_MEM_ENTRY_SIZE
     mul edx
-    mov edi, STAGE2_LINEAR_BASE + memmap_entries
+    mov edi, memmap_entries
     add edi, eax
     mov eax, [esp + 0]   ; base low
     mov edx, [esp + 8]   ; base high
@@ -835,10 +872,10 @@ acpi_map_table_phys:
     cmp ebx, LOW_IDENTITY_SIZE
     jae .fail
     mov esi, ebx
-    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov edi, acpi_table_buffer
     mov ecx, 36
     rep movsb
-    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov edi, acpi_table_buffer
     mov edx, [edi + 4]
     cmp edx, 36
     jb .fail
@@ -850,7 +887,7 @@ acpi_map_table_phys:
     ja .fail
     mov esi, ebx
     add esi, 36
-    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 36
+    mov edi, acpi_table_buffer + 36
     mov ecx, edx
     sub ecx, 36
     rep movsb
@@ -875,7 +912,7 @@ smp_register_cpu:
     or dword [acpi_info_flags], ACPI_FLAG_CPU_LIMIT
     jmp .done
 .store:
-    mov edi, STAGE2_LINEAR_BASE + cpu_entries
+    mov edi, cpu_entries
     mov eax, ecx
     mov ebx, CPU_ENTRY_SIZE
     mul ebx
@@ -931,8 +968,8 @@ smp_reset_info:
     mov eax, ACPI_FLAG_HAS_MADT
     or eax, ACPI_FLAG_CPU_LIMIT
     not eax
-    and [acpi_info_flags], eax
-    mov edi, STAGE2_LINEAR_BASE + cpu_entries
+    and dword [acpi_info_flags], eax
+    mov edi, cpu_entries
     mov ecx, (NOVA_CPU_MAX_ENTRIES * CPU_ENTRY_SIZE) / 4
     xor eax, eax
     rep stosd
@@ -945,13 +982,13 @@ smp_scan_rsdt:
     je .out
     call acpi_map_table32
     jc .out
-    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov esi, acpi_table_buffer
     mov ebx, [esi + 4]
     cmp ebx, 36
     jb .unmap
     sub ebx, 36
     shr ebx, 2
-    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 36
+    mov edi, acpi_table_buffer + 36
 .rsdt_loop:
     test ebx, ebx
     jz .unmap
@@ -981,13 +1018,13 @@ smp_scan_xsdt:
 .have_ptr:
     call acpi_map_table64
     jc .out
-    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov esi, acpi_table_buffer
     mov ebx, [esi + 4]
     cmp ebx, 44
     jb .unmap
     sub ebx, 44
     shr ebx, 3
-    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 44
+    mov edi, acpi_table_buffer + 44
 .xsdt_loop:
     test ebx, ebx
     jz .unmap
@@ -1030,7 +1067,7 @@ smp_try_parse_table64:
 
 smp_parse_madt:
     pushad
-    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov esi, acpi_table_buffer
     mov eax, [esi]
     cmp eax, ACPI_SIG_MADT
     jne .out
@@ -1092,6 +1129,46 @@ smp_handle_iso:
 smp_handle_nmi:
     jmp smp_parse_madt.advance
 
+init_idt:
+    pushad
+    mov ebx, STAGE2_ABS(default_isr)
+    mov edx, CODE32_SELECTOR
+    mov ecx, 256
+    mov edi, idt_entries
+.idt_loop:
+    mov word [edi], bx
+    mov word [edi + 2], dx
+    mov byte [edi + 4], 0
+    mov byte [edi + 5], 0x8E
+    mov eax, ebx
+    shr eax, 16
+    mov word [edi + 6], ax
+    add edi, 8
+    loop .idt_loop
+
+    mov ebx, STAGE2_ABS(default_isr_err)
+    mov esi, error_code_vectors
+    mov ecx, ERROR_VECTOR_COUNT
+.patch_loop:
+    movzx eax, byte [esi]
+    imul eax, eax, 8
+    lea edi, [idt_entries + eax]
+    mov word [edi], bx
+    mov word [edi + 2], dx
+    mov byte [edi + 4], 0
+    mov byte [edi + 5], 0x8E
+    mov eax, ebx
+    shr eax, 16
+    mov word [edi + 6], ax
+    inc esi
+    loop .patch_loop
+
+    mov eax, STAGE2_ABS(idt_entries)
+    mov [idt_descriptor_pm + 2], eax
+    lidt [idt_descriptor_pm]
+    popad
+    ret
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
@@ -1103,9 +1180,9 @@ gdt_descriptor:
 
 gdt_start:
     dq 0x0000000000000000          ; Null descriptor
-    dq 0x00CF9A000000FFFF          ; 32-bit code segment
-    dq 0x00CF92000000FFFF          ; Data segment
-    dq 0x00AF9A000000FFFF          ; 64-bit code segment
+    GDT_ENTRY 0x000FFFFF, STAGE2_LINEAR_BASE, 0x9A, 0x0C   ; 32-bit code
+    GDT_ENTRY 0x000FFFFF, STAGE2_LINEAR_BASE, 0x92, 0x0C   ; Data segment
+    GDT_ENTRY 0x000FFFFF, STAGE2_LINEAR_BASE, 0x9A, 0x0A   ; 64-bit code
 gdt_end:
 
 align 4096
@@ -1163,6 +1240,18 @@ cpu_bsp_lapic_id:    dd 0
 cpu_lapic_phys:      dd 0
 cpu_entries:
     times (NOVA_CPU_MAX_ENTRIES * 4) dd 0
+idt_descriptor_pm:
+    dw idt_entries_end - idt_entries - 1
+    dd idt_entries
+idt_entries:
+    times 256 dq 0
+idt_entries_end:
+default_isr:
+    iretd
+default_isr_err:
+    add esp, 4
+    iretd
+error_code_vectors: db 8, 10, 11, 12, 13, 14, 17
 firmware_kind:       db FIRMWARE_KIND_BIOS
 firmware_boot_drive: db 0
 firmware_flags:      dw 0
