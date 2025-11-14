@@ -25,6 +25,7 @@
 %define BOOT_MAP_SIZE     0x00020000
 %define LONG_MODE_STACK   (BOOT_VIRT_BASE + BOOT_MAP_SIZE - 0x10)
 %define UEFI_UTF16_BUFFER_LEN 256
+%define BIOS_E820_ENTRY_SIZE    24
 
 %define PAGE_SIZE         0x1000
 %define PAGE_FLAG_PRESENT 0x001
@@ -63,6 +64,8 @@ stage2_entry:
 
     cld
     call firmware_init_rm
+    call memmap_reset_raw
+    call memmap_collect_rm
     mov si, stage2_real_mode_msg
     call fw_console_write_rm
 
@@ -123,6 +126,90 @@ bios_console_write_rm:
     pop ax
     ret
 
+memmap_reset_raw:
+    mov word [bios_memmap_raw_count], 0
+    mov dword [memmap_truncated_flag], 0
+    ret
+
+memmap_collect_rm:
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    je bios_collect_e820
+    ret
+
+bios_collect_e820:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+
+    xor ebx, ebx
+
+.e820_loop:
+    mov ax, cs
+    mov es, ax
+    mov di, bios_e820_temp
+    mov eax, 0xE820
+    mov edx, 0x534D4150
+    xor ecx, ecx
+    mov cx, BIOS_E820_ENTRY_SIZE
+    int 0x15
+    jc .done
+    cmp eax, 0x534D4150
+    jne .done
+
+    call bios_store_e820_entry
+
+    cmp ebx, 0
+    jne .e820_loop
+
+.done:
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+bios_store_e820_entry:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov ax, [bios_memmap_raw_count]
+    cmp ax, NOVA_MEM_MAX_ENTRIES
+    jae .overflow
+
+    mov bx, BIOS_E820_ENTRY_SIZE
+    mul bx
+    mov si, bios_e820_temp
+    mov di, bios_memmap_raw_entries
+    add di, ax
+    mov cx, BIOS_E820_ENTRY_SIZE / 2
+    rep movsw
+
+    inc word [bios_memmap_raw_count]
+    jmp .done
+
+.overflow:
+    mov dword [memmap_truncated_flag], 1
+
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 [bits 32]
 protected_mode_entry:
     mov ax, DATA_SELECTOR
@@ -134,6 +221,7 @@ protected_mode_entry:
     mov esp, PROT_STACK_TOP
 
     call setup_paging
+    call memmap_build_normalized
 
     mov esi, STAGE2_LINEAR_BASE + pmode_message
     call fw_console_write_pm
@@ -305,6 +393,242 @@ uefi_console_write_pm_stub:
     ; developers still see diagnostics if the backend is misdetected.
     jmp console_write_vga32
 
+memmap_build_normalized:
+    pushad
+    call memmap_reset_final
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    je .from_bios
+    cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
+    je .from_uefi
+    jmp .done
+.from_bios:
+    call memmap_build_from_bios
+    jmp .done
+.from_uefi:
+    call memmap_build_from_uefi
+.done:
+    popad
+    ret
+
+memmap_reset_final:
+    mov dword [memmap_header_signature], NOVA_MEM_SIGNATURE
+    mov dword [memmap_entry_count], 0
+    mov dword [memmap_source_kind], NOVA_MEM_SOURCE_NONE
+
+    mov edi, STAGE2_LINEAR_BASE + memmap_entries
+    mov ecx, NOVA_MEM_MAX_ENTRIES * NOVA_MEM_ENTRY_DWORDS
+    xor eax, eax
+    rep stosd
+    ret
+
+memmap_build_from_bios:
+    pushad
+    mov dword [memmap_source_kind], NOVA_MEM_SOURCE_BIOS
+    movzx ecx, word [bios_memmap_raw_count]
+    mov edi, STAGE2_LINEAR_BASE + bios_memmap_raw_entries
+.bios_loop:
+    test ecx, ecx
+    jz .bios_done
+    mov eax, [edi + 0]
+    mov [memmap_tmp_base_low], eax
+    mov eax, [edi + 4]
+    mov [memmap_tmp_base_high], eax
+    mov eax, [edi + 8]
+    mov [memmap_tmp_len_low], eax
+    mov eax, [edi + 12]
+    mov [memmap_tmp_len_high], eax
+    mov eax, [edi + 20]
+    mov [memmap_tmp_attr], eax
+    mov esi, [edi + 16]
+    call map_bios_type
+    test esi, esi
+    jz .bios_skip
+    mov eax, [memmap_tmp_len_low]
+    or eax, [memmap_tmp_len_high]
+    jz .bios_skip
+    mov eax, [memmap_tmp_base_low]
+    mov edx, [memmap_tmp_base_high]
+    mov ebx, [memmap_tmp_len_low]
+    mov ecx, [memmap_tmp_len_high]
+    mov edi, [memmap_tmp_attr]
+    call memmap_append_entry
+.bios_skip:
+    add edi, BIOS_E820_ENTRY_SIZE
+    dec ecx
+    jmp .bios_loop
+.bios_done:
+    popad
+    ret
+
+memmap_build_from_uefi:
+    pushad
+    mov ebp, dword [uefi_memmap_ptr]
+    mov eax, dword [uefi_memmap_size]
+    mov edx, ebp
+    add edx, eax
+    test ebp, ebp
+    jz .uefi_done
+    test eax, eax
+    jz .uefi_done
+    mov dword [memmap_source_kind], NOVA_MEM_SOURCE_UEFI
+.uefi_loop:
+    cmp ebp, edx
+    jae .uefi_done
+    mov eax, dword [uefi_memdesc_size]
+    test eax, eax
+    jz .uefi_done
+    mov [memmap_tmp_desc_size], eax
+    mov esi, [ebp + 0]
+    call map_uefi_type
+    test esi, esi
+    jz .uefi_skip
+    mov eax, [ebp + 8]
+    mov [memmap_tmp_base_low], eax
+    mov eax, [ebp + 12]
+    mov [memmap_tmp_base_high], eax
+    mov eax, [ebp + 24]
+    mov [memmap_tmp_len_low], eax
+    mov eax, [ebp + 28]
+    mov [memmap_tmp_len_high], eax
+    mov eax, [ebp + 32]
+    mov [memmap_tmp_attr], eax
+
+    mov eax, [memmap_tmp_len_low]
+    mov ecx, [memmap_tmp_len_high]
+    shld ecx, eax, 12
+    shl eax, 12
+    mov [memmap_tmp_len_low], eax
+    mov [memmap_tmp_len_high], ecx
+
+    mov eax, [memmap_tmp_len_low]
+    or eax, [memmap_tmp_len_high]
+    jz .uefi_skip
+
+    mov eax, [memmap_tmp_base_low]
+    mov edx, [memmap_tmp_base_high]
+    mov ebx, [memmap_tmp_len_low]
+    mov ecx, [memmap_tmp_len_high]
+    mov edi, [memmap_tmp_attr]
+    call memmap_append_entry
+.uefi_skip:
+    mov eax, [memmap_tmp_desc_size]
+    add ebp, eax
+    jmp .uefi_loop
+.uefi_done:
+    popad
+    ret
+
+map_bios_type:
+    cmp esi, 1
+    je .usable
+    cmp esi, 2
+    je .reserved
+    cmp esi, 3
+    je .acpi_reclaim
+    cmp esi, 4
+    je .acpi_nvs
+    cmp esi, 5
+    je .mmio
+    cmp esi, 7
+    je .persistent
+    jmp .default_reserved
+.usable:
+    mov esi, NOVA_MEM_TYPE_USABLE
+    ret
+.reserved:
+.default_reserved:
+    mov esi, NOVA_MEM_TYPE_RESERVED
+    ret
+.acpi_reclaim:
+    mov esi, NOVA_MEM_TYPE_ACPI_RECLAIM
+    ret
+.acpi_nvs:
+    mov esi, NOVA_MEM_TYPE_ACPI_NVS
+    ret
+.mmio:
+    mov esi, NOVA_MEM_TYPE_MMIO
+    ret
+.persistent:
+    mov esi, NOVA_MEM_TYPE_PERSISTENT
+    ret
+
+map_uefi_type:
+    cmp esi, 7              ; EfiConventionalMemory
+    je .usable
+    cmp esi, 1              ; LoaderCode
+    je .usable
+    cmp esi, 2              ; LoaderData
+    je .usable
+    cmp esi, 3              ; BootServicesCode
+    je .usable
+    cmp esi, 4              ; BootServicesData
+    je .usable
+    cmp esi, 8              ; Unusable
+    je .bad
+    cmp esi, 9              ; ACPI reclaim
+    je .acpi_reclaim
+    cmp esi, 10             ; ACPI NVS
+    je .acpi_nvs
+    cmp esi, 11             ; MMIO
+    je .mmio
+    cmp esi, 12             ; MMIO port space
+    je .mmio
+    cmp esi, 14             ; Persistent Mem
+    je .persistent
+    mov esi, NOVA_MEM_TYPE_RESERVED
+    ret
+.usable:
+    mov esi, NOVA_MEM_TYPE_USABLE
+    ret
+.bad:
+    mov esi, NOVA_MEM_TYPE_BAD
+    ret
+.acpi_reclaim:
+    mov esi, NOVA_MEM_TYPE_ACPI_RECLAIM
+    ret
+.acpi_nvs:
+    mov esi, NOVA_MEM_TYPE_ACPI_NVS
+    ret
+.mmio:
+    mov esi, NOVA_MEM_TYPE_MMIO
+    ret
+.persistent:
+    mov esi, NOVA_MEM_TYPE_PERSISTENT
+    ret
+
+memmap_append_entry:
+    pushad
+    mov eax, [memmap_entry_count]
+    cmp eax, NOVA_MEM_MAX_ENTRIES
+    jb .store
+    mov dword [memmap_truncated_flag], 1
+    jmp .done
+.store:
+    mov edx, NOVA_MEM_ENTRY_SIZE
+    mul edx
+    mov edi, STAGE2_LINEAR_BASE + memmap_entries
+    add edi, eax
+    mov eax, [esp + 0]   ; base low
+    mov edx, [esp + 8]   ; base high
+    mov ebx, [esp + 12]  ; length low
+    mov ecx, [esp + 4]   ; length high
+    mov esi, [esp + 24]  ; type
+    mov ebp, [esp + 28]  ; attr
+
+    mov [edi + 0], eax
+    mov [edi + 4], edx
+    mov [edi + 8], ebx
+    mov [edi + 12], ecx
+    mov [edi + 16], esi
+    mov [edi + 20], ebp
+
+    mov eax, [memmap_entry_count]
+    inc eax
+    mov [memmap_entry_count], eax
+.done:
+    popad
+    ret
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
@@ -336,6 +660,25 @@ page_tables_end:
 paging_context:
     dq 0
 
+memmap_header_signature: dd NOVA_MEM_SIGNATURE
+memmap_entry_count:      dd 0
+memmap_truncated_flag:   dd 0
+memmap_source_kind:      dd NOVA_MEM_SOURCE_NONE
+memmap_entries:
+    times (NOVA_MEM_MAX_ENTRIES * NOVA_MEM_ENTRY_DWORDS) dd 0
+
+memmap_tmp_base_low:   dd 0
+memmap_tmp_base_high:  dd 0
+memmap_tmp_len_low:    dd 0
+memmap_tmp_len_high:   dd 0
+memmap_tmp_attr:       dd 0
+memmap_tmp_desc_size:  dd 0
+
+bios_memmap_raw_count:   dw 0
+bios_memmap_raw_entries:
+    times (NOVA_MEM_MAX_ENTRIES * BIOS_E820_ENTRY_SIZE) db 0
+bios_e820_temp:          times BIOS_E820_ENTRY_SIZE db 0
+
 firmware_kind:       db FIRMWARE_KIND_BIOS
 firmware_boot_drive: db 0
 firmware_flags:      dw 0
@@ -344,6 +687,10 @@ uefi_system_table_ptr: dq 0
 uefi_text_output_ptr:  dq 0
 uefi_block_io_ptr:     dq 0
 uefi_image_handle_ptr: dq 0
+uefi_memmap_ptr:       dq 0
+uefi_memmap_size:      dq 0
+uefi_memdesc_size:     dd 0
+uefi_memdesc_version:  dd 0
 uefi_utf16_buffer:     times UEFI_UTF16_BUFFER_LEN dw 0
 
 [bits 64]
@@ -468,5 +815,13 @@ firmware_install_uefi:
     mov [uefi_block_io_ptr], rax
     mov rax, [rdi + NOVA_FW_CTX_IMAGE_HANDLE]
     mov [uefi_image_handle_ptr], rax
+    mov rax, [rdi + NOVA_FW_CTX_MEMMAP_PTR]
+    mov [uefi_memmap_ptr], rax
+    mov rax, [rdi + NOVA_FW_CTX_MEMMAP_SIZE]
+    mov [uefi_memmap_size], rax
+    mov eax, dword [rdi + NOVA_FW_CTX_MEMDESC_SIZE]
+    mov [uefi_memdesc_size], eax
+    mov eax, dword [rdi + NOVA_FW_CTX_MEMDESC_VERSION]
+    mov [uefi_memdesc_version], eax
 .done:
     ret

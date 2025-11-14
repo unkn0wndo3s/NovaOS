@@ -8,12 +8,35 @@
 
 %define NOVA_FIRMWARE_SIGNATURE 0x4E465755 ; 'NFWU'
 
+; Nova firmware context layout (all offsets in bytes)
 %define NOVA_FW_CTX_SIGNATURE        0
 %define NOVA_FW_CTX_SYSTEM_TABLE     8
 %define NOVA_FW_CTX_TEXT_OUTPUT      16
 %define NOVA_FW_CTX_BLOCK_IO         24
 %define NOVA_FW_CTX_IMAGE_HANDLE     32
-%define NOVA_FW_CTX_RESERVED0        40
-%define NOVA_FW_CTX_TOTAL_SIZE       48
+%define NOVA_FW_CTX_MEMMAP_PTR       40
+%define NOVA_FW_CTX_MEMMAP_SIZE      48
+%define NOVA_FW_CTX_MEMDESC_SIZE     56
+%define NOVA_FW_CTX_MEMDESC_VERSION  60
+%define NOVA_FW_CTX_RESERVED0        64
+%define NOVA_FW_CTX_TOTAL_SIZE       72
+
+; Normalized memory map constants
+%define NOVA_MEM_SIGNATURE       0x4E4D4D50 ; 'NMMP'
+%define NOVA_MEM_MAX_ENTRIES     128
+%define NOVA_MEM_ENTRY_SIZE      24
+%define NOVA_MEM_ENTRY_DWORDS    (NOVA_MEM_ENTRY_SIZE / 4)
+
+%define NOVA_MEM_TYPE_USABLE         1
+%define NOVA_MEM_TYPE_RESERVED       2
+%define NOVA_MEM_TYPE_ACPI_RECLAIM   3
+%define NOVA_MEM_TYPE_ACPI_NVS       4
+%define NOVA_MEM_TYPE_MMIO           5
+%define NOVA_MEM_TYPE_BAD            6
+%define NOVA_MEM_TYPE_PERSISTENT     7
+
+%define NOVA_MEM_SOURCE_NONE 0
+%define NOVA_MEM_SOURCE_BIOS 1
+%define NOVA_MEM_SOURCE_UEFI 2
 
 %endif

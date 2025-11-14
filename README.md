@@ -77,6 +77,7 @@ The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if re
     - Kernel window: maps `0xFFFFFFFF80000000-0xFFFFFFFF80200000` to physical `0x00200000` (2 MiB).
     - Bootloader window: maps `0xFFFFFFFF80200000` onward to the real-mode loader image at `0x00010000` (128 KiB).
   - Enables PAE, sets IA32_EFER.LME, turns on paging (CR0.PG), then far-jumps to a 64-bit code segment. A unified firmware API (`fw_console_write_*`) now handles all console output while the BIOS backend falls back to VGA text memory and the UEFI backend routes through `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` when configured. A second-stage check confirms `CS=0x18`, `SS=0x10`, and the high-half stack pointer before announcing long-mode status.
+  - Collects the system memory map: BIOS builds a raw E820 table in real mode, while UEFI shims can inject their firmware memory map via the shared `NovaFirmwareContext`. In protected mode the loader normalizes every descriptor into a compact internal array (`memmap_header` + `memmap_entries`) so later stages see consistent types, lengths, and a truncation flag regardless of firmware.
   - This is the natural place to add A20 enable logic, paging, and kernel loading.
 
 The Stage 1 build depends on `build/stage2.inc`, which is generated automatically by `scripts/gen_stage2_inc.sh`. The script pads `stage2.bin` out to whole sectors and records how many sectors Stage 1 should request from the BIOS.
@@ -99,6 +100,15 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
   - `fw_console_write_pm` (32-bit) — used during paging/GDT setup; BIOS backend writes to VGA memory, UEFI backend defers to VGA until the handoff switches contexts.
   - `fw_console_write_lm` (64-bit) — BIOS backend keeps writing to the text buffer, while the UEFI backend calls `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString` if the context block provided a pointer.
 - UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, and image handle pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O and memory-map hooks can follow the same pattern when we add higher-level services.
+
+## Memory Map
+
+- Stage 2 always resets and rebuilds a normalized map before entering 64-bit mode.
+  - **BIOS path:** a real-mode INT 15h/E820 sweep is cached in `bios_memmap_raw_entries`, then converted into the canonical format once protected mode is active.
+  - **UEFI path:** supply the original firmware memory map through the `NovaFirmwareContext` fields (`MEMMAP_PTR`, `MEMMAP_SIZE`, `MEMDESC_SIZE`, `MEMDESC_VERSION`) and call `firmware_install_uefi()`; the shared loader consumes those descriptors without caring whether the system started in BIOS or UEFI.
+- Normalized output lives under `memmap_header` (`signature=NOVA_MEM_SIGNATURE`, `entry_count`, `truncated`, `source_kind`) followed by `memmap_entries`, a fixed array of `NOVA_MEM_MAX_ENTRIES` records. Each record stores `{ base (64-bit), length (64-bit), type (enum), attributes (32-bit) }`.
+- Types are abstracted into a small, firmware-neutral set (`NOVA_MEM_TYPE_USABLE`, `RESERVED`, `ACPI_RECLAIM`, `ACPI_NVS`, `MMIO`, `BAD`, `PERSISTENT`). Any unmapped firmware codes fall back to `RESERVED`.
+- If the raw BIOS sweep or the normalized table overflows `NOVA_MEM_MAX_ENTRIES`, `memmap_truncated_flag` is set to `1` so later stages can degrade gracefully.
 
 ## Contribution Rules
 
