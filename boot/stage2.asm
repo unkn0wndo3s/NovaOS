@@ -68,6 +68,10 @@
 %define STAGE2_ABS(addr) ((addr) + STAGE2_LINEAR_BASE)
 %define PROT_STACK_PTR   (PROT_STACK_TOP - STAGE2_LINEAR_BASE)
 
+%define BOOTINFO_SIGNATURE 0x42494E46 ; 'BINF'
+%define BOOTINFO_FLAG_SMBIOS   (1 << 0)
+%define BOOTINFO_FLAG_CPU_BRAND (1 << 1)
+
 %macro GDT_ENTRY 4
     dw (%1 & 0xFFFF)
     dw (%2 & 0xFFFF)
@@ -270,10 +274,14 @@ protected_mode_entry:
     mov esp, PROT_STACK_PTR
 
     call init_idt
+    call bootinfo_init
+    call bootinfo_collect_cpu
     call setup_paging
     call memmap_build_normalized
     call acpi_collect_tables
     call smp_collect_cpu_info
+    call bootinfo_collect_smbios
+    call bootinfo_finalize
 
     mov esi, pmode_message
     call fw_console_write_pm
@@ -678,6 +686,122 @@ memmap_append_entry:
     inc eax
     mov [memmap_entry_count], eax
 .done:
+    popad
+    ret
+
+bootinfo_init:
+    pushad
+    mov edi, bootinfo_struct
+    mov ecx, (bootinfo_end - bootinfo_struct) / 4
+    xor eax, eax
+    rep stosd
+    mov dword [bootinfo_signature], BOOTINFO_SIGNATURE
+    mov eax, bootinfo_end - bootinfo_struct
+    mov [bootinfo_length], eax
+    mov dword [bootinfo_version], 1
+    popad
+    ret
+
+bootinfo_collect_cpu:
+    pushad
+    xor ecx, ecx
+    mov eax, 0
+    cpuid
+    mov [bootinfo_cpu_max_basic], eax
+    mov [bootinfo_cpu_vendor], ebx
+    mov [bootinfo_cpu_vendor + 4], edx
+    mov [bootinfo_cpu_vendor + 8], ecx
+    mov byte [bootinfo_cpu_vendor + 12], 0
+
+    mov eax, 1
+    xor ecx, ecx
+    cpuid
+    mov [bootinfo_cpu_signature], eax
+    mov [bootinfo_cpu_features_edx], edx
+    mov [bootinfo_cpu_features_ecx], ecx
+
+    mov eax, 0x80000000
+    xor ecx, ecx
+    cpuid
+    mov [bootinfo_cpu_max_ext], eax
+    cmp eax, 0x80000004
+    jb .no_brand
+    mov esi, bootinfo_cpu_brand
+    mov eax, 0x80000002
+.brand_loop:
+    xor ecx, ecx
+    cpuid
+    mov [esi], eax
+    mov [esi + 4], ebx
+    mov [esi + 8], ecx
+    mov [esi + 12], edx
+    add esi, 16
+    inc eax
+    cmp eax, 0x80000005
+    jb .brand_loop
+    or dword [bootinfo_flags], BOOTINFO_FLAG_CPU_BRAND
+.no_brand:
+    popad
+    ret
+
+bootinfo_collect_smbios:
+    pushad
+    mov esi, 0x000F0000
+    mov edi, 0x00100000
+.scan_loop:
+    cmp esi, edi
+    jae .done
+    mov eax, [esi]
+    cmp eax, 0x5F4D535F            ; '_SM_'
+    je .check_v2
+    add esi, 16
+    jmp .scan_loop
+.check_v2:
+    movzx ecx, byte [esi + 5]
+    cmp ecx, 0
+    je .next
+    push ecx
+    mov edi, esi
+    xor ebx, ebx
+.sum_loop:
+    add bl, [edi]
+    inc edi
+    dec ecx
+    jnz .sum_loop
+    test bl, bl
+    pop ecx
+    jne .next
+    mov eax, [esi + 0x10]
+    cmp eax, 0x5F494D44            ; 'DMI_'
+    jne .next
+    mov edi, esi
+    add edi, 0x10
+    mov ecx, 0x0F
+    xor bl, bl
+.dmi_sum:
+    add bl, [edi]
+    inc edi
+    dec ecx
+    jnz .dmi_sum
+    test bl, bl
+    jne .next
+    mov eax, [esi + 0x18]
+    mov [bootinfo_smbios_phys], eax
+    movzx eax, word [esi + 0x16]
+    mov [bootinfo_smbios_len], eax
+    or dword [bootinfo_flags], BOOTINFO_FLAG_SMBIOS
+    jmp .done
+.next:
+    add esi, 16
+    jmp .scan_loop
+.done:
+    popad
+    ret
+
+bootinfo_finalize:
+    pushad
+    mov eax, [cpu_info_count]
+    mov [bootinfo_cpu_core_count], eax
     popad
     ret
 
@@ -1240,6 +1364,24 @@ cpu_bsp_lapic_id:    dd 0
 cpu_lapic_phys:      dd 0
 cpu_entries:
     times (NOVA_CPU_MAX_ENTRIES * 4) dd 0
+bootinfo_struct:
+bootinfo_signature:      dd 0
+bootinfo_length:         dd 0
+bootinfo_version:        dd 0
+bootinfo_flags:          dd 0
+bootinfo_cpu_vendor:     times 16 db 0
+bootinfo_cpu_brand:      times 48 db 0
+bootinfo_cpu_signature:  dd 0
+bootinfo_cpu_features_edx: dd 0
+bootinfo_cpu_features_ecx: dd 0
+bootinfo_cpu_max_basic:  dd 0
+bootinfo_cpu_max_ext:    dd 0
+bootinfo_cpu_core_count: dd 0
+bootinfo_smbios_phys:    dd 0
+bootinfo_smbios_len:     dd 0
+bootinfo_reserved:       times 8 dd 0
+bootinfo_end:
+bootinfo_ptr:            dd bootinfo_struct
 idt_descriptor_pm:
     dw idt_entries_end - idt_entries - 1
     dd idt_entries

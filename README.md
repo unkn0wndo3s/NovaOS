@@ -80,6 +80,7 @@ The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if re
   - Collects the system memory map: BIOS builds a raw E820 table in real mode, while UEFI shims can inject their firmware memory map via the shared `NovaFirmwareContext`. In protected mode the loader normalizes every descriptor into a compact internal array (`memmap_header` + `memmap_entries`) so later stages see consistent types, lengths, and a truncation flag regardless of firmware.
   - Discovers ACPI: BIOS mode scans the EBDA and high BIOS area for the RSDP; UEFI mode may supply the pointer through `NovaFirmwareContext`. The loader validates the descriptor, captures the revision, and records the RSDT/XSDT physical addresses so the kernel can jump straight to ACPI tables.
   - Enumerates CPUs: once the ACPI tables are cached, Stage 2 parses the MADT entries (from either RSDT or XSDT) and records LAPIC IDs, BSP hints, and bitmaps for up to `NOVA_CPU_MAX_ENTRIES` logical processors. Overflow sets the `NOVA_ACPI_FLAG_CPU_LIMIT` flag so the kernel can warn about truncated topologies.
+  - Builds a `BootInfo` hardware summary that accompanies the memory/CPU tables. CPUID is used to capture the vendor string, maximum leaf, feature flags, and (if available) the full brand string; the final CPU count is copied from the SMP enumeration. A SMBIOS entry-point scan (`0xF0000-0xFFFFF`) records table length and physical address when an `_SM_` anchor is present.
   - This is the natural place to add A20 enable logic, paging, and kernel loading.
 
 The Stage 1 build depends on `build/stage2.inc`, which is generated automatically by `scripts/gen_stage2_inc.sh`. The script pads `stage2.bin` out to whole sectors and records how many sectors Stage 1 should request from the BIOS.
@@ -130,6 +131,19 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
 - Each entry inside `cpu_entries` currently uses 16 bytes: `{apic_id (8-bit), kind, flags, logical_index, apic_id copy, reserved}`. `kind` is `NOVA_CPU_KIND_LAPIC` for standard LAPIC processors; future types (I/O APIC, clusters) can reuse the same structure.
 - `cpu_bsp_lapic_id`, `cpu_apic_id_bmp_low`, and `cpu_apic_id_bmp_high` expose quick BSP/bitmap summaries for up to 64 APIC IDs. If more processors exist than the fixed buffer allows, `NOVA_ACPI_FLAG_CPU_LIMIT` toggles so the kernel can fall back to runtime ACPI parsing.
 - MADT parsing walks the entries provided in either the RSDT or the XSDT, depending on the ACPI revision. If no MADT is present or the firmware table lives outside the identity-mapped window, the structures remain zeroed and the kernel should rescan using the ACPI pointers described above.
+
+## BootInfo Hardware Summary
+
+- `bootinfo_struct` (symbol exported from `boot/stage2.asm`) starts with the signature `'BINF'`, a size field, and a version number (currently `1`). The structure is zeroed on every boot so downstream code can treat missing values as zero.
+- CPU fields:
+  - `bootinfo_cpu_vendor` stores the 12-byte CPUID vendor string.
+  - `bootinfo_cpu_signature`, `bootinfo_cpu_features_edx`, and `bootinfo_cpu_features_ecx` mirror the `cpuid(1)` outputs.
+  - `bootinfo_cpu_max_basic` / `bootinfo_cpu_max_ext` record the highest supported leaf; if the extended range reaches `0x80000004`, the 48-byte brand string is populated and `BOOTINFO_FLAG_CPU_BRAND` is set.
+  - `bootinfo_cpu_core_count` is copied from the SMP enumeration so the kernel doesn’t need to reparse the MADT to get a logical core count.
+- SMBIOS fields:
+  - The loader scans the BIOS window for the `_SM_` anchor. When a valid checksum is found, `bootinfo_smbios_phys` and `bootinfo_smbios_len` capture the table location and reported length while `BOOTINFO_FLAG_SMBIOS` is raised.
+  - These pointers are raw physical addresses (identity-mapped under 2 MiB) so the kernel can immediately parse SMBIOS without rescan.
+- Future hardware summaries (PCI, EC, etc.) can extend the structure; the size/version fields let later kernels detect new additions safely.
 
 ## Contribution Rules
 
