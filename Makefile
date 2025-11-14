@@ -1,5 +1,6 @@
 BUILD_DIR := build
 NASM ?= nasm
+NASMFLAGS ?= -Iboot/include
 
 STAGE1_SRC := boot/stage1.asm
 STAGE2_SRC := boot/stage2.asm
@@ -16,13 +17,13 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(STAGE2_BIN): $(STAGE2_SRC) | $(BUILD_DIR)
-	$(NASM) -f bin $< -o $@
+	$(NASM) $(NASMFLAGS) -f bin $< -o $@
 
 $(STAGE2_INC): $(STAGE2_BIN)
 	scripts/gen_stage2_inc.sh $< $@
 
 $(STAGE1_BIN): $(STAGE1_SRC) $(STAGE2_INC) | $(BUILD_DIR)
-	$(NASM) -f bin -I$(BUILD_DIR) $< -o $@
+	$(NASM) $(NASMFLAGS) -f bin -I$(BUILD_DIR) $< -o $@
 
 $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN)
 	cat $(STAGE1_BIN) $(STAGE2_BIN) > $@

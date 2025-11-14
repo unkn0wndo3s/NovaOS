@@ -1,6 +1,8 @@
 [org 0]
 [bits 16]
 
+%include "firmware.inc"
+
 %define STACK_SEG        0x9000
 %define STACK_TOP_OFF    0xFFFE
 %define PROT_STACK_TOP   0x0009F000
@@ -22,6 +24,7 @@
 %define BOOT_VIRT_BASE    0xFFFFFFFF80200000
 %define BOOT_MAP_SIZE     0x00020000
 %define LONG_MODE_STACK   (BOOT_VIRT_BASE + BOOT_MAP_SIZE - 0x10)
+%define UEFI_UTF16_BUFFER_LEN 256
 
 %define PAGE_SIZE         0x1000
 %define PAGE_FLAG_PRESENT 0x001
@@ -59,8 +62,9 @@ stage2_entry:
     mov es, ax
 
     cld
+    call firmware_init_rm
     mov si, stage2_real_mode_msg
-    call print_string
+    call fw_console_write_rm
 
     ; Copy the GDT template into low memory (0x0000:0x0500)
     mov si, gdt_start
@@ -81,7 +85,24 @@ stage2_entry:
 
     jmp CODE32_SELECTOR:protected_mode_entry
 
-print_string:
+firmware_init_rm:
+    mov byte [firmware_kind], FIRMWARE_KIND_BIOS
+    mov [firmware_boot_drive], dl
+    ret
+
+fw_console_write_rm:
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    je bios_console_write_rm
+    cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
+    je uefi_console_write_rm_stub
+    jmp bios_console_write_rm
+
+uefi_console_write_rm_stub:
+    ; UEFI path never runs in real mode; fall back to BIOS routines so higher
+    ; levels still get diagnostic output.
+    jmp bios_console_write_rm
+
+bios_console_write_rm:
     push ax
     push bx
     push si
@@ -115,19 +136,8 @@ protected_mode_entry:
     call setup_paging
 
     mov esi, STAGE2_LINEAR_BASE + pmode_message
-    mov edi, 0x000B8000
-    mov bl, 0x07
+    call fw_console_write_pm
 
-.pm_print:
-    lodsb
-    test al, al
-    jz .pm_done
-    mov ah, bl
-    mov [edi], ax
-    add edi, 2
-    jmp .pm_print
-
-.pm_done:
     call enter_long_mode
 
 .pm_hang:
@@ -260,6 +270,41 @@ enter_long_mode:
 
     jmp CODE64_SELECTOR:STAGE2_LINEAR_BASE + long_mode_entry
 
+fw_console_write_pm:
+    pushad
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    je .bios
+    cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
+    je .uefi
+.bios:
+    call console_write_vga32
+    jmp .done
+.uefi:
+    call uefi_console_write_pm_stub
+    jmp .done
+.done:
+    popad
+    ret
+
+console_write_vga32:
+    mov edi, 0x000B8000
+    mov bl, 0x07
+.pm_loop:
+    lodsb
+    test al, al
+    jz .pm_done
+    mov ah, bl
+    mov [edi], ax
+    add edi, 2
+    jmp .pm_loop
+.pm_done:
+    ret
+
+uefi_console_write_pm_stub:
+    ; Genuine UEFI firmware never executes this path, but fall back to VGA so
+    ; developers still see diagnostics if the backend is misdetected.
+    jmp console_write_vga32
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
@@ -291,6 +336,16 @@ page_tables_end:
 paging_context:
     dq 0
 
+firmware_kind:       db FIRMWARE_KIND_BIOS
+firmware_boot_drive: db 0
+firmware_flags:      dw 0
+
+uefi_system_table_ptr: dq 0
+uefi_text_output_ptr:  dq 0
+uefi_block_io_ptr:     dq 0
+uefi_image_handle_ptr: dq 0
+uefi_utf16_buffer:     times UEFI_UTF16_BUFFER_LEN dw 0
+
 [bits 64]
 long_mode_entry:
     mov ax, DATA_SELECTOR
@@ -321,9 +376,38 @@ long_mode_fail:
     lea rsi, [rel long_mode_error]
 
 long_mode_print:
+    call fw_console_write_lm
+    cli
+.lm_halt:
+    hlt
+    jmp .lm_halt
+
+long_mode_success: db "NovaOS long mode active (CS=0x18, SS=0x10, stack ok).", 0
+long_mode_error:   db "Long mode validation failed!", 0
+
+fw_console_write_lm:
+    push rbx
+    push rdi
+    push rsi
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    je .bios
+    cmp byte [firmware_kind], FIRMWARE_KIND_UEFI
+    je .uefi
+.bios:
+    call console_write_vga64
+    jmp .done
+.uefi:
+    call uefi_console_write_lm
+    jmp .done
+.done:
+    pop rsi
+    pop rdi
+    pop rbx
+    ret
+
+console_write_vga64:
     mov rdi, 0x00000000000B8000
     mov bl, 0x0A
-
 .lm_print_loop:
     lodsb
     test al, al
@@ -332,12 +416,57 @@ long_mode_print:
     mov [rdi], ax
     add rdi, 2
     jmp .lm_print_loop
-
 .lm_print_done:
-    cli
-.lm_halt:
-    hlt
-    jmp .lm_halt
+    ret
 
-long_mode_success: db "NovaOS long mode active (CS=0x18, SS=0x10, stack ok).", 0
-long_mode_error:   db "Long mode validation failed!", 0
+uefi_console_write_lm:
+    mov rax, [uefi_text_output_ptr]
+    test rax, rax
+    jz console_write_vga64
+    push rsi
+    push rdi
+    lea rdi, [rel uefi_utf16_buffer]
+    call ascii_to_utf16
+    mov rdx, rax
+    mov rcx, [uefi_text_output_ptr]
+    mov rax, [rcx + EFI_SIMPLE_TEXT_OUTPUT_OUTPUTSTRING]
+    mov r8, 0
+    mov r9, 0
+    call rax
+    pop rdi
+    pop rsi
+    ret
+
+ascii_to_utf16:
+    push rbx
+    mov rbx, rdi
+.utf16_loop:
+    lodsb
+    mov [rdi], al
+    mov byte [rdi + 1], 0
+    add rdi, 2
+    test al, al
+    jne .utf16_loop
+    mov rax, rbx
+    pop rbx
+    ret
+
+firmware_install_uefi:
+    ; RDI points to a NovaFirmwareContext structure populated by the UEFI stub.
+    test rdi, rdi
+    jz .done
+    mov eax, dword [rdi + NOVA_FW_CTX_SIGNATURE]
+    cmp eax, NOVA_FIRMWARE_SIGNATURE
+    jne .done
+
+    mov byte [firmware_kind], FIRMWARE_KIND_UEFI
+    mov rax, [rdi + NOVA_FW_CTX_SYSTEM_TABLE]
+    mov [uefi_system_table_ptr], rax
+    mov rax, [rdi + NOVA_FW_CTX_TEXT_OUTPUT]
+    mov [uefi_text_output_ptr], rax
+    mov rax, [rdi + NOVA_FW_CTX_BLOCK_IO]
+    mov [uefi_block_io_ptr], rax
+    mov rax, [rdi + NOVA_FW_CTX_IMAGE_HANDLE]
+    mov [uefi_image_handle_ptr], rax
+.done:
+    ret

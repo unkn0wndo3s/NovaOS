@@ -76,7 +76,7 @@ The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if re
     - Identity map of the lowest 2 MiB keeps BIOS-visible memory reachable during transition.
     - Kernel window: maps `0xFFFFFFFF80000000-0xFFFFFFFF80200000` to physical `0x00200000` (2 MiB).
     - Bootloader window: maps `0xFFFFFFFF80200000` onward to the real-mode loader image at `0x00010000` (128 KiB).
-  - Enables PAE, sets IA32_EFER.LME, turns on paging (CR0.PG), then far-jumps to a 64-bit code segment. A second-stage check confirms `CS=0x18`, `SS=0x10`, and the high-half stack pointer before printing a long-mode banner to VGA text memory.
+  - Enables PAE, sets IA32_EFER.LME, turns on paging (CR0.PG), then far-jumps to a 64-bit code segment. A unified firmware API (`fw_console_write_*`) now handles all console output while the BIOS backend falls back to VGA text memory and the UEFI backend routes through `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` when configured. A second-stage check confirms `CS=0x18`, `SS=0x10`, and the high-half stack pointer before announcing long-mode status.
   - This is the natural place to add A20 enable logic, paging, and kernel loading.
 
 The Stage 1 build depends on `build/stage2.inc`, which is generated automatically by `scripts/gen_stage2_inc.sh`. The script pads `stage2.bin` out to whole sectors and records how many sectors Stage 1 should request from the BIOS.
@@ -88,7 +88,17 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
 - The GDT is currently staged at physical address `0x00000500`; update `GDT_BASE` in `boot/stage2.asm` if you need a different location, and keep it below 1 MiB unless A20 is enabled.
 - Paging structures live inside Stage 2 (see the `page_tables_start` block). If you relocate Stage 2, update `STAGE2_LOAD_SEG` to keep the physical addresses computed for CR3 valid. Expand the identity/kernel/boot mappings via the constants at the top of `boot/stage2.asm`.
 - Long-mode entry uses the selectors defined in the Stage 2 GDT (`0x18` for 64-bit code, `0x10` for data). Adjust those descriptors if you change the GDT layout or need additional privilege levels.
+- All firmware-related interfaces live under `boot/include/firmware.inc`. Callers should use the `fw_console_write_rm/pm/lm` helpers (exposed by `boot/stage2.asm`) instead of invoking BIOS interrupts or UEFI protocols directly. A future UEFI loader can populate a `NovaFirmwareContext` structure (signature `NFWU`) and call `firmware_install_uefi()` to switch the backend without modifying higher-level code.
 - Keep Stage 1 within 512 bytes including the `0xAA55` signature; `nasm` plus the padding directive in `boot/stage1.asm` enforces this.
+
+## Firmware Abstraction Layer
+
+- `boot/include/firmware.inc` holds the shared constants: firmware kinds, the `NFWU` context signature, and the offsets every UEFI shim must fill before jumping into Stage 2.
+- Stage 2 publishes three console helpers:
+  - `fw_console_write_rm` (real mode) — BIOS backend implements INT 10h, UEFI backend currently falls back to VGA for diagnostics.
+  - `fw_console_write_pm` (32-bit) — used during paging/GDT setup; BIOS backend writes to VGA memory, UEFI backend defers to VGA until the handoff switches contexts.
+  - `fw_console_write_lm` (64-bit) — BIOS backend keeps writing to the text buffer, while the UEFI backend calls `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString` if the context block provided a pointer.
+- UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, and image handle pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O and memory-map hooks can follow the same pattern when we add higher-level services.
 
 ## Contribution Rules
 
