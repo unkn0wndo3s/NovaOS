@@ -27,6 +27,12 @@
 %define UEFI_UTF16_BUFFER_LEN 256
 %define BIOS_E820_ENTRY_SIZE    24
 
+%define ACPI_RSDP_MIN_LEN     20
+%define ACPI_RSDP_COPY_LEN    36
+%define ACPI_FLAG_FOUND       NOVA_ACPI_FLAG_FOUND
+%define ACPI_FLAG_HAS_XSDT    NOVA_ACPI_FLAG_HAS_XSDT
+%define ACPI_FLAG_FROM_UEFI   NOVA_ACPI_FLAG_FROM_UEFI
+
 %define PAGE_SIZE         0x1000
 %define PAGE_FLAG_PRESENT 0x001
 %define PAGE_FLAG_RW      0x002
@@ -222,6 +228,7 @@ protected_mode_entry:
 
     call setup_paging
     call memmap_build_normalized
+    call acpi_collect_tables
 
     mov esi, STAGE2_LINEAR_BASE + pmode_message
     call fw_console_write_pm
@@ -629,6 +636,177 @@ memmap_append_entry:
     popad
     ret
 
+acpi_collect_tables:
+    pushad
+    test dword [acpi_info_flags], ACPI_FLAG_FOUND
+    jnz .ensure_cache
+    cmp byte [firmware_kind], FIRMWARE_KIND_BIOS
+    jne .ensure_cache
+    call acpi_search_bios_pm
+    jc .ensure_cache
+    mov [acpi_rsdp_phys], eax
+    mov dword [acpi_rsdp_phys + 4], 0
+    and dword [acpi_info_flags], ~ACPI_FLAG_FROM_UEFI
+.ensure_cache:
+    cmp word [acpi_rsdp_cache_len], 0
+    jne .process
+    call acpi_copy_rsdp_from_phys32
+.process:
+    cmp word [acpi_rsdp_cache_len], 0
+    je .out
+    call acpi_process_rsdp_cache
+.out:
+    popad
+    ret
+
+acpi_search_bios_pm:
+    movzx eax, word [0x0000040E]
+    shl eax, 4
+    mov edx, eax
+    add edx, 0x00000400
+    call acpi_scan_region_pm
+    jnc .done
+    mov eax, 0x000E0000
+    mov edx, 0x00100000
+    call acpi_scan_region_pm
+.done:
+    ret
+
+acpi_scan_region_pm:
+    push ebx
+    push esi
+    push edi
+    mov esi, eax
+.scan_loop:
+    cmp esi, edx
+    jae .fail
+    mov edi, rsdp_signature
+    mov ecx, 8
+    mov ebx, esi
+.cmp_loop:
+    mov al, [ebx]
+    mov ah, [edi]
+    cmp al, ah
+    jne .advance
+    inc ebx
+    inc edi
+    dec ecx
+    jnz .cmp_loop
+    mov edi, acpi_rsdp_cache
+    mov ecx, ACPI_RSDP_COPY_LEN
+    mov ebx, esi
+.copy_loop:
+    mov al, [ebx]
+    mov [edi], al
+    inc ebx
+    inc edi
+    dec ecx
+    jnz .copy_loop
+    call acpi_validate_rsdp_cache_pm
+    jc .advance
+    mov eax, esi
+    clc
+    jmp .exit
+.advance:
+    add esi, 16
+    jmp .scan_loop
+.fail:
+    stc
+.exit:
+    pop edi
+    pop esi
+    pop ebx
+    ret
+
+acpi_copy_rsdp_from_phys32:
+    pushad
+    mov eax, [acpi_rsdp_phys + 4]
+    test eax, eax
+    jne .fail
+    mov eax, [acpi_rsdp_phys]
+    test eax, eax
+    je .fail
+    cmp eax, LOW_IDENTITY_SIZE
+    jae .fail
+    mov esi, eax
+    mov edi, acpi_rsdp_cache
+    mov ecx, ACPI_RSDP_COPY_LEN
+.cp_loop:
+    mov al, [esi]
+    mov [edi], al
+    inc esi
+    inc edi
+    dec ecx
+    jnz .cp_loop
+    call acpi_validate_rsdp_cache_pm
+.fail:
+    popad
+    ret
+
+acpi_validate_rsdp_cache_pm:
+    pushad
+    movzx ecx, byte [acpi_rsdp_cache + 15]
+    mov [acpi_rsdp_revision], cl
+    mov eax, ACPI_RSDP_MIN_LEN
+    cmp cl, 2
+    jb .len_ready
+    mov eax, [acpi_rsdp_cache + 20]
+    cmp eax, ACPI_RSDP_COPY_LEN
+    jbe .len_ready
+    mov eax, ACPI_RSDP_COPY_LEN
+.len_ready:
+    cmp eax, ACPI_RSDP_MIN_LEN
+    jae .len_ok
+    mov eax, ACPI_RSDP_MIN_LEN
+.len_ok:
+    mov [acpi_rsdp_cache_len], ax
+    movzx ecx, ax
+    mov esi, acpi_rsdp_cache
+    xor edx, edx
+.chk_loop:
+    movzx eax, byte [esi]
+    add dl, al
+    inc esi
+    loop .chk_loop
+    test dl, dl
+    jne .chk_fail
+    or dword [acpi_info_flags], ACPI_FLAG_FOUND
+    clc
+    jmp .chk_done
+.chk_fail:
+    mov word [acpi_rsdp_cache_len], 0
+    stc
+.chk_done:
+    popad
+    ret
+
+acpi_process_rsdp_cache:
+    pushad
+    cmp word [acpi_rsdp_cache_len], 0
+    je .done
+    movzx eax, byte [acpi_rsdp_cache + 15]
+    mov [acpi_rsdp_revision], al
+    mov eax, [acpi_rsdp_cache + 16]
+    mov [acpi_rsdt_phys], eax
+    mov eax, [acpi_rsdp_cache + 24]
+    mov [acpi_xsdt_phys], eax
+    mov eax, [acpi_rsdp_cache + 28]
+    mov [acpi_xsdt_phys + 4], eax
+    mov eax, [acpi_xsdt_phys]
+    or eax, [acpi_xsdt_phys + 4]
+    movzx ecx, byte [acpi_rsdp_cache + 15]
+    cmp ecx, 2
+    jb .no_xsdt
+    test eax, eax
+    je .no_xsdt
+    or dword [acpi_info_flags], ACPI_FLAG_HAS_XSDT
+    jmp .done
+.no_xsdt:
+    and dword [acpi_info_flags], ~ACPI_FLAG_HAS_XSDT
+.done:
+    popad
+    ret
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
@@ -678,6 +856,17 @@ bios_memmap_raw_count:   dw 0
 bios_memmap_raw_entries:
     times (NOVA_MEM_MAX_ENTRIES * BIOS_E820_ENTRY_SIZE) db 0
 bios_e820_temp:          times BIOS_E820_ENTRY_SIZE db 0
+
+acpi_info_signature: dd 0x4E414350
+acpi_info_flags:     dd 0
+acpi_rsdp_phys:      dq 0
+acpi_rsdt_phys:      dd 0
+acpi_xsdt_phys:      dq 0
+acpi_rsdp_revision:  db 0
+acpi_rsdp_cache_len: dw 0
+acpi_reserved_pad:   db 0
+acpi_rsdp_cache:     times ACPI_RSDP_COPY_LEN db 0
+rsdp_signature:      db "RSD PTR ", 0
 
 firmware_kind:       db FIRMWARE_KIND_BIOS
 firmware_boot_drive: db 0
@@ -823,5 +1012,11 @@ firmware_install_uefi:
     mov [uefi_memdesc_size], eax
     mov eax, dword [rdi + NOVA_FW_CTX_MEMDESC_VERSION]
     mov [uefi_memdesc_version], eax
+    mov rax, [rdi + NOVA_FW_CTX_RSDP_PTR]
+    mov [acpi_rsdp_phys], rax
+    test rax, rax
+    je .done
+    mov word [acpi_rsdp_cache_len], 0
+    or dword [acpi_info_flags], ACPI_FLAG_FOUND | ACPI_FLAG_FROM_UEFI
 .done:
     ret

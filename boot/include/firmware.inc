@@ -18,8 +18,9 @@
 %define NOVA_FW_CTX_MEMMAP_SIZE      48
 %define NOVA_FW_CTX_MEMDESC_SIZE     56
 %define NOVA_FW_CTX_MEMDESC_VERSION  60
-%define NOVA_FW_CTX_RESERVED0        64
-%define NOVA_FW_CTX_TOTAL_SIZE       72
+%define NOVA_FW_CTX_RSDP_PTR         64
+%define NOVA_FW_CTX_RESERVED0        72
+%define NOVA_FW_CTX_TOTAL_SIZE       80
 
 ; Normalized memory map constants
 %define NOVA_MEM_SIGNATURE       0x4E4D4D50 ; 'NMMP'
@@ -38,5 +39,10 @@
 %define NOVA_MEM_SOURCE_NONE 0
 %define NOVA_MEM_SOURCE_BIOS 1
 %define NOVA_MEM_SOURCE_UEFI 2
+
+; ACPI info flags
+%define NOVA_ACPI_FLAG_FOUND        0x00000001
+%define NOVA_ACPI_FLAG_HAS_XSDT     0x00000002
+%define NOVA_ACPI_FLAG_FROM_UEFI    0x00000004
 
 %endif
