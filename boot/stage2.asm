@@ -5,9 +5,40 @@
 %define STACK_TOP_OFF    0xFFFE
 %define PROT_STACK_TOP   0x0009F000
 
+%define STAGE2_LOAD_SEG  0x1000
+%assign STAGE2_PHYS_BASE (STAGE2_LOAD_SEG << 4)
+%define STAGE2_LINEAR_BASE STAGE2_PHYS_BASE
+
 %define GDT_BASE         0x0500
 %define CODE_SELECTOR    0x08
 %define DATA_SELECTOR    0x10
+
+%define LOW_IDENTITY_SIZE 0x00200000
+%define KERNEL_PHYS_BASE  0x00200000
+%define KERNEL_VIRT_BASE  0xFFFFFFFF80000000
+%define KERNEL_MAP_SIZE   0x00200000
+%define BOOT_PHYS_BASE    STAGE2_PHYS_BASE
+%define BOOT_VIRT_BASE    0xFFFFFFFF80200000
+%define BOOT_MAP_SIZE     0x00020000
+
+%define PAGE_SIZE         0x1000
+%define PAGE_FLAG_PRESENT 0x001
+%define PAGE_FLAG_RW      0x002
+%define PAGE_FLAGS        (PAGE_FLAG_PRESENT | PAGE_FLAG_RW)
+
+%assign KERNEL_PML4_INDEX ((KERNEL_VIRT_BASE >> 39) & 0x1FF)
+%assign KERNEL_PDPT_INDEX ((KERNEL_VIRT_BASE >> 30) & 0x1FF)
+%assign KERNEL_PD_INDEX   ((KERNEL_VIRT_BASE >> 21) & 0x1FF)
+%assign KERNEL_PT_INDEX   ((KERNEL_VIRT_BASE >> 12) & 0x1FF)
+
+%assign BOOT_PML4_INDEX   ((BOOT_VIRT_BASE >> 39) & 0x1FF)
+%assign BOOT_PDPT_INDEX   ((BOOT_VIRT_BASE >> 30) & 0x1FF)
+%assign BOOT_PD_INDEX     ((BOOT_VIRT_BASE >> 21) & 0x1FF)
+%assign BOOT_PT_INDEX     ((BOOT_VIRT_BASE >> 12) & 0x1FF)
+
+%assign IDENTITY_PAGE_COUNT (LOW_IDENTITY_SIZE / PAGE_SIZE)
+%assign KERNEL_PAGE_COUNT   (KERNEL_MAP_SIZE / PAGE_SIZE)
+%assign BOOT_PAGE_COUNT     (BOOT_MAP_SIZE / PAGE_SIZE)
 
 stage2_entry:
     cli
@@ -74,7 +105,9 @@ protected_mode_entry:
     mov ss, ax
     mov esp, PROT_STACK_TOP
 
-    mov esi, pmode_message
+    call setup_paging
+
+    mov esi, STAGE2_LINEAR_BASE + pmode_message
     mov edi, 0x000B8000
     mov bl, 0x07
 
@@ -93,10 +126,117 @@ protected_mode_entry:
     hlt
     jmp .pm_hang
 
+setup_paging:
+    pushad
+
+    ; Clear paging structures
+    mov edi, STAGE2_LINEAR_BASE + page_tables_start
+    mov ecx, (page_tables_end - page_tables_start) / 4
+    xor eax, eax
+    rep stosd
+
+    ; PML4 entries
+    mov edi, STAGE2_LINEAR_BASE + pml4_table
+    mov eax, STAGE2_PHYS_BASE + pdpt_low
+    or eax, PAGE_FLAGS
+    mov [edi + (0 * 8)], eax
+    mov dword [edi + (0 * 8) + 4], 0
+
+    mov eax, STAGE2_PHYS_BASE + pdpt_high
+    or eax, PAGE_FLAGS
+    mov [edi + (KERNEL_PML4_INDEX * 8)], eax
+    mov dword [edi + (KERNEL_PML4_INDEX * 8) + 4], 0
+%if KERNEL_PML4_INDEX != BOOT_PML4_INDEX
+    mov [edi + (BOOT_PML4_INDEX * 8)], eax
+    mov dword [edi + (BOOT_PML4_INDEX * 8) + 4], 0
+%endif
+
+    ; PDPT entries
+    mov edi, STAGE2_LINEAR_BASE + pdpt_low
+    mov eax, STAGE2_PHYS_BASE + pd_low
+    or eax, PAGE_FLAGS
+    mov [edi + (0 * 8)], eax
+    mov dword [edi + (0 * 8) + 4], 0
+
+    mov edi, STAGE2_LINEAR_BASE + pdpt_high
+    mov eax, STAGE2_PHYS_BASE + pd_high
+    or eax, PAGE_FLAGS
+    mov [edi + (KERNEL_PDPT_INDEX * 8)], eax
+    mov dword [edi + (KERNEL_PDPT_INDEX * 8) + 4], 0
+%if KERNEL_PDPT_INDEX != BOOT_PDPT_INDEX
+    mov [edi + (BOOT_PDPT_INDEX * 8)], eax
+    mov dword [edi + (BOOT_PDPT_INDEX * 8) + 4], 0
+%endif
+
+    ; PD entries
+    mov edi, STAGE2_LINEAR_BASE + pd_low
+    mov eax, STAGE2_PHYS_BASE + pt_identity
+    or eax, PAGE_FLAGS
+    mov [edi + (0 * 8)], eax
+    mov dword [edi + (0 * 8) + 4], 0
+
+    mov edi, STAGE2_LINEAR_BASE + pd_high
+    mov eax, STAGE2_PHYS_BASE + pt_kernel
+    or eax, PAGE_FLAGS
+    mov [edi + (KERNEL_PD_INDEX * 8)], eax
+    mov dword [edi + (KERNEL_PD_INDEX * 8) + 4], 0
+
+    mov eax, STAGE2_PHYS_BASE + pt_boot
+    or eax, PAGE_FLAGS
+    mov [edi + (BOOT_PD_INDEX * 8)], eax
+    mov dword [edi + (BOOT_PD_INDEX * 8) + 4], 0
+
+    ; Identity PT entries
+    mov edi, STAGE2_LINEAR_BASE + pt_identity
+    mov ecx, IDENTITY_PAGE_COUNT
+    xor ebx, ebx
+.identity_loop:
+    mov eax, ebx
+    or eax, PAGE_FLAGS
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add edi, 8
+    add ebx, PAGE_SIZE
+    loop .identity_loop
+
+    ; Kernel PT entries
+    mov edi, STAGE2_LINEAR_BASE + pt_kernel + (KERNEL_PT_INDEX * 8)
+    mov ecx, KERNEL_PAGE_COUNT
+    mov ebx, KERNEL_PHYS_BASE
+.kernel_loop:
+    mov eax, ebx
+    or eax, PAGE_FLAGS
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add edi, 8
+    add ebx, PAGE_SIZE
+    loop .kernel_loop
+
+    ; Bootloader PT entries
+    mov edi, STAGE2_LINEAR_BASE + pt_boot + (BOOT_PT_INDEX * 8)
+    mov ecx, BOOT_PAGE_COUNT
+    mov ebx, BOOT_PHYS_BASE
+.boot_loop:
+    mov eax, ebx
+    or eax, PAGE_FLAGS
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add edi, 8
+    add ebx, PAGE_SIZE
+    loop .boot_loop
+
+    ; Persist CR3 candidate
+    mov eax, STAGE2_PHYS_BASE + pml4_table
+    mov [paging_context], eax
+    mov dword [paging_context + 4], 0
+
+    popad
+    ret
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
-pmode_message:        db "NovaOS is now in 32-bit protected mode.", 0
+pmode_message:        db "NovaOS entered protected mode; paging tables ready.", 0
 
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
@@ -107,3 +247,18 @@ gdt_start:
     dq 0x00CF9A000000FFFF          ; Code segment: base 0, limit 4 GiB
     dq 0x00CF92000000FFFF          ; Data segment: base 0, limit 4 GiB
 gdt_end:
+
+align 4096
+page_tables_start:
+pml4_table:  times 512 dq 0
+pdpt_low:    times 512 dq 0
+pd_low:      times 512 dq 0
+pt_identity: times 512 dq 0
+pdpt_high:   times 512 dq 0
+pd_high:     times 512 dq 0
+pt_kernel:   times 512 dq 0
+pt_boot:     times 512 dq 0
+page_tables_end:
+
+paging_context:
+    dq 0
