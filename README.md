@@ -16,43 +16,69 @@ No feature documentation is included here.
 Nova OS bootloader development officially supports Linux (Ubuntu recommended).
 
 Mandatory toolchain:
-- x86_64-elf-gcc
-- binutils (x86_64-elf target)
+- nasm
 - make
+- qemu-system-x86
+- python3
 - Standard Linux build utilities
 
-All build commands are handled by the provided .sh scripts.
+All build commands are handled by the provided `.sh` scripts.
 
 ## Installation
 
 Install all dependencies with:
 
+```
 ./setup.sh
+```
 
 This installs:
-- cross-compiler (x86_64-elf-gcc)
-- binutils
-- required system packages
-- environment preparation
+- nasm
+- qemu-system-x86
+- build utilities used by the Makefile
 
 ## Build
 
 Compile the bootloader:
 
+```
 ./build.sh
+```
 
-This compiles:
-- bootloader sources
-- required objects
-- final binary output
+This runs `make`, generating:
+- `build/stage1.bin` — BIOS boot sector (Stage 1)
+- `build/stage2.bin` — loader payload (Stage 2, padded to sector boundaries)
+- `build/novaos.img` — concatenated disk image ready for QEMU
 
 ## Run
 
 Start the bootloader in QEMU:
 
+```
 ./run.sh
+```
 
-This script launches the emulator with the correct configuration.
+The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if required.
+
+## Boot Flow Overview
+
+- **Stage 1 (`boot/stage1.asm`)**
+  - BIOS loads the first sector at `0x7C00`.
+  - Code immediately sets up a stack, then relocates itself to `0x0600:0000` to keep the original BIOS buffer free.
+  - Uses INT 13h extensions (AH=0x42) to load `STAGE2_SECTORS` sectors starting at LBA 1 into `0x1000:0000`.
+  - After a successful read, jumps to Stage 2; otherwise prints an error via BIOS TTY and halts.
+
+- **Stage 2 (`boot/stage2.asm`)**
+  - Simple real-mode stub that proves control transfer and can be extended into a full loader or kernel handoff.
+  - Safe stack at `0x0000:0x9FFF` and helper routine to print diagnostic strings.
+
+The Stage 1 build depends on `build/stage2.inc`, which is generated automatically by `scripts/gen_stage2_inc.sh`. The script pads `stage2.bin` out to whole sectors and records how many sectors Stage 1 should request from the BIOS.
+
+## Customisation Notes
+
+- Extend Stage 2 freely; the helper script recalculates the sector count every build, so no manual constants are needed unless you change the load address.
+- If Stage 2 grows beyond the first few sectors, ensure it still fits within the BIOS-readable area or add paging logic before switching to protected/long mode.
+- Keep Stage 1 within 512 bytes including the `0xAA55` signature; `nasm` plus the padding directive in `boot/stage1.asm` enforces this.
 
 ## Contribution Rules
 
