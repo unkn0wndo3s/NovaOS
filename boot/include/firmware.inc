@@ -44,5 +44,12 @@
 %define NOVA_ACPI_FLAG_FOUND        0x00000001
 %define NOVA_ACPI_FLAG_HAS_XSDT     0x00000002
 %define NOVA_ACPI_FLAG_FROM_UEFI    0x00000004
+%define NOVA_ACPI_FLAG_HAS_MADT     0x00000008
+%define NOVA_ACPI_FLAG_CPU_LIMIT    0x00000010
+
+; CPU topology constants
+%define NOVA_CPU_MAX_ENTRIES        256
+%define NOVA_CPU_KIND_LAPIC         1
+%define NOVA_CPU_KIND_IOAPIC        2
 
 %endif

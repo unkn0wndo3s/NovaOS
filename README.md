@@ -79,6 +79,7 @@ The image boots in `qemu-system-x86_64`. Pass extra QEMU flags to `run.sh` if re
   - Enables PAE, sets IA32_EFER.LME, turns on paging (CR0.PG), then far-jumps to a 64-bit code segment. A unified firmware API (`fw_console_write_*`) now handles all console output while the BIOS backend falls back to VGA text memory and the UEFI backend routes through `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` when configured. A second-stage check confirms `CS=0x18`, `SS=0x10`, and the high-half stack pointer before announcing long-mode status.
   - Collects the system memory map: BIOS builds a raw E820 table in real mode, while UEFI shims can inject their firmware memory map via the shared `NovaFirmwareContext`. In protected mode the loader normalizes every descriptor into a compact internal array (`memmap_header` + `memmap_entries`) so later stages see consistent types, lengths, and a truncation flag regardless of firmware.
   - Discovers ACPI: BIOS mode scans the EBDA and high BIOS area for the RSDP; UEFI mode may supply the pointer through `NovaFirmwareContext`. The loader validates the descriptor, captures the revision, and records the RSDT/XSDT physical addresses so the kernel can jump straight to ACPI tables.
+  - Enumerates CPUs: once the ACPI tables are cached, Stage 2 parses the MADT entries (from either RSDT or XSDT) and records LAPIC IDs, BSP hints, and bitmaps for up to `NOVA_CPU_MAX_ENTRIES` logical processors. Overflow sets the `NOVA_ACPI_FLAG_CPU_LIMIT` flag so the kernel can warn about truncated topologies.
   - This is the natural place to add A20 enable logic, paging, and kernel loading.
 
 The Stage 1 build depends on `build/stage2.inc`, which is generated automatically by `scripts/gen_stage2_inc.sh`. The script pads `stage2.bin` out to whole sectors and records how many sectors Stage 1 should request from the BIOS.
@@ -100,7 +101,7 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
   - `fw_console_write_rm` (real mode) — BIOS backend implements INT 10h, UEFI backend currently falls back to VGA for diagnostics.
   - `fw_console_write_pm` (32-bit) — used during paging/GDT setup; BIOS backend writes to VGA memory, UEFI backend defers to VGA until the handoff switches contexts.
   - `fw_console_write_lm` (64-bit) — BIOS backend keeps writing to the text buffer, while the UEFI backend calls `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString` if the context block provided a pointer.
-- UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, image handle, memory-map, and RSDP pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O, ACPI, and other services follow the same pattern without touching the high-level loaders.
+- UEFI shims can prepare a `NovaFirmwareContext` structure anywhere in memory, set the first doubleword to `NFWU`, populate the system table, simple text output, block I/O, image handle, memory-map, and RSDP pointers, then call `firmware_install_uefi(rdi=ctx)` before transferring control to the shared long-mode logic. Disk I/O, ACPI, CPU topology, and other services follow the same pattern without touching the high-level loaders.
 
 ## Memory Map
 
@@ -122,6 +123,13 @@ The Stage 1 build depends on `build/stage2.inc`, which is generated automaticall
   - `acpi_rsdt_phys` — 32-bit physical address from the RSDP (always present).
   - `acpi_xsdt_phys` — 64-bit physical address if revision ≥2; `ACPI_FLAG_HAS_XSDT` indicates whether it is valid.
   - `acpi_rsdp_cache_len` + `acpi_rsdp_cache` — cached copy of the descriptor (20–36 bytes) so later stages can revalidate without re-scanning firmware memory.
+
+## CPU / SMP Info
+
+- `cpu_info_signature` is set to `'NCPU'` (`0x4E435550`) whenever enumeration succeeds. `cpu_info_count` tracks the number of logical processors recorded (capped by `NOVA_CPU_MAX_ENTRIES`).
+- Each entry inside `cpu_entries` currently uses 16 bytes: `{apic_id (8-bit), kind, flags, logical_index, apic_id copy, reserved}`. `kind` is `NOVA_CPU_KIND_LAPIC` for standard LAPIC processors; future types (I/O APIC, clusters) can reuse the same structure.
+- `cpu_bsp_lapic_id`, `cpu_apic_id_bmp_low`, and `cpu_apic_id_bmp_high` expose quick BSP/bitmap summaries for up to 64 APIC IDs. If more processors exist than the fixed buffer allows, `NOVA_ACPI_FLAG_CPU_LIMIT` toggles so the kernel can fall back to runtime ACPI parsing.
+- MADT parsing walks the entries provided in either the RSDT or the XSDT, depending on the ACPI revision. If no MADT is present or the firmware table lives outside the identity-mapped window, the structures remain zeroed and the kernel should rescan using the ACPI pointers described above.
 
 ## Contribution Rules
 

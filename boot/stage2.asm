@@ -32,6 +32,8 @@
 %define ACPI_FLAG_FOUND       NOVA_ACPI_FLAG_FOUND
 %define ACPI_FLAG_HAS_XSDT    NOVA_ACPI_FLAG_HAS_XSDT
 %define ACPI_FLAG_FROM_UEFI   NOVA_ACPI_FLAG_FROM_UEFI
+%define ACPI_FLAG_HAS_MADT    NOVA_ACPI_FLAG_HAS_MADT
+%define ACPI_FLAG_CPU_LIMIT   NOVA_ACPI_FLAG_CPU_LIMIT
 
 %define PAGE_SIZE         0x1000
 %define PAGE_FLAG_PRESENT 0x001
@@ -56,6 +58,11 @@
 %define EFER_LME        (1 << 8)
 %define CR4_PAE         (1 << 5)
 %define CR0_PG          0x80000000
+
+%define ACPI_SIG_MADT   0x5444414D    ; 'MADT'
+%define ACPI_SIG_APIC   ACPI_SIG_MADT
+%define ACPI_TABLE_BUFFER_SIZE 4096
+%define CPU_ENTRY_SIZE  16
 
 stage2_entry:
     cli
@@ -229,6 +236,7 @@ protected_mode_entry:
     call setup_paging
     call memmap_build_normalized
     call acpi_collect_tables
+    call smp_collect_cpu_info
 
     mov esi, STAGE2_LINEAR_BASE + pmode_message
     call fw_console_write_pm
@@ -807,6 +815,283 @@ acpi_process_rsdp_cache:
     popad
     ret
 
+acpi_map_table32:
+    push edx
+    xor edx, edx
+    call acpi_map_table_phys
+    pop edx
+    ret
+
+acpi_map_table64:
+    call acpi_map_table_phys
+    ret
+
+acpi_map_table_phys:
+    pushad
+    mov ebx, eax
+    mov ecx, edx
+    test ecx, ecx
+    jne .fail
+    cmp ebx, LOW_IDENTITY_SIZE
+    jae .fail
+    mov esi, ebx
+    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov ecx, 36
+    rep movsb
+    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov edx, [edi + 4]
+    cmp edx, 36
+    jb .fail
+    cmp edx, ACPI_TABLE_BUFFER_SIZE
+    ja .fail
+    mov eax, ebx
+    add eax, edx
+    cmp eax, LOW_IDENTITY_SIZE
+    ja .fail
+    mov esi, ebx
+    add esi, 36
+    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 36
+    mov ecx, edx
+    sub ecx, 36
+    rep movsb
+    clc
+    jmp .done
+.fail:
+    stc
+.done:
+    popad
+    ret
+
+acpi_unmap_table:
+    ret
+
+smp_register_cpu:
+    pushad
+    mov esi, eax                ; APIC ID
+    mov dl, al
+    mov ecx, [cpu_info_count]
+    cmp ecx, NOVA_CPU_MAX_ENTRIES
+    jb .store
+    or dword [acpi_info_flags], ACPI_FLAG_CPU_LIMIT
+    jmp .done
+.store:
+    mov edi, STAGE2_LINEAR_BASE + cpu_entries
+    mov eax, ecx
+    mov ebx, CPU_ENTRY_SIZE
+    mul ebx
+    add edi, eax
+    cmp byte [edi], 0
+    jne .skip_store
+    mov byte [edi], dl
+    mov byte [edi + 1], NOVA_CPU_KIND_LAPIC
+    mov word [edi + 2], 0
+    mov [edi + 4], ecx
+    mov [edi + 8], esi
+    mov dword [edi + 12], 0
+.skip_store:
+    mov eax, ecx
+    inc eax
+    mov [cpu_info_count], eax
+    mov eax, esi
+    cmp eax, 32
+    jb .lowbmp
+    sub eax, 32
+    bts dword [cpu_apic_id_bmp_high], eax
+    jmp .bitmap_done
+.lowbmp:
+    bts dword [cpu_apic_id_bmp_low], eax
+.bitmap_done:
+    cmp dword [cpu_bsp_lapic_id], 0
+    jne .done
+    mov [cpu_bsp_lapic_id], esi
+.done:
+    popad
+    ret
+smp_collect_cpu_info:
+    pushad
+    call smp_reset_info
+    test dword [acpi_info_flags], ACPI_FLAG_FOUND
+    je .done
+    test dword [acpi_info_flags], ACPI_FLAG_HAS_XSDT
+    jne .use_xsdt
+    call smp_scan_rsdt
+    jmp .done
+.use_xsdt:
+    call smp_scan_xsdt
+.done:
+    popad
+    ret
+
+smp_reset_info:
+    mov dword [cpu_info_signature], 0x4E435550
+    mov dword [cpu_info_count], 0
+    mov dword [cpu_apic_id_bmp_low], 0
+    mov dword [cpu_apic_id_bmp_high], 0
+    mov dword [cpu_bsp_lapic_id], 0
+    mov eax, ACPI_FLAG_HAS_MADT
+    or eax, ACPI_FLAG_CPU_LIMIT
+    not eax
+    and [acpi_info_flags], eax
+    mov edi, STAGE2_LINEAR_BASE + cpu_entries
+    mov ecx, (NOVA_CPU_MAX_ENTRIES * CPU_ENTRY_SIZE) / 4
+    xor eax, eax
+    rep stosd
+    ret
+
+smp_scan_rsdt:
+    pushad
+    mov eax, [acpi_rsdt_phys]
+    test eax, eax
+    je .out
+    call acpi_map_table32
+    jc .out
+    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov ebx, [esi + 4]
+    cmp ebx, 36
+    jb .unmap
+    sub ebx, 36
+    shr ebx, 2
+    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 36
+.rsdt_loop:
+    test ebx, ebx
+    jz .unmap
+    mov eax, [edi]
+    push ebx
+    push edi
+    call smp_try_parse_table32
+    pop edi
+    pop ebx
+    add edi, 4
+    dec ebx
+    jmp .rsdt_loop
+.unmap:
+    call acpi_unmap_table
+.out:
+    popad
+    ret
+
+smp_scan_xsdt:
+    pushad
+    mov eax, [acpi_xsdt_phys]
+    mov edx, [acpi_xsdt_phys + 4]
+    test eax, eax
+    jne .have_ptr
+    test edx, edx
+    je .out
+.have_ptr:
+    call acpi_map_table64
+    jc .out
+    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov ebx, [esi + 4]
+    cmp ebx, 44
+    jb .unmap
+    sub ebx, 44
+    shr ebx, 3
+    mov edi, STAGE2_LINEAR_BASE + acpi_table_buffer + 44
+.xsdt_loop:
+    test ebx, ebx
+    jz .unmap
+    mov eax, [edi]
+    mov edx, [edi + 4]
+    push ebx
+    push edi
+    call smp_try_parse_table64
+    pop edi
+    pop ebx
+    add edi, 8
+    dec ebx
+    jmp .xsdt_loop
+.unmap:
+    call acpi_unmap_table
+.out:
+    popad
+    ret
+
+smp_try_parse_table32:
+    pushad
+    mov edx, 0
+    call acpi_map_table_phys
+    jc .done
+    call smp_parse_madt
+    call acpi_unmap_table
+.done:
+    popad
+    ret
+
+smp_try_parse_table64:
+    pushad
+    call acpi_map_table_phys
+    jc .done
+    call smp_parse_madt
+    call acpi_unmap_table
+.done:
+    popad
+    ret
+
+smp_parse_madt:
+    pushad
+    mov esi, STAGE2_LINEAR_BASE + acpi_table_buffer
+    mov eax, [esi]
+    cmp eax, ACPI_SIG_MADT
+    jne .out
+    mov ebx, [cpu_info_count]
+    mov ecx, [esi + 36]
+    mov [cpu_lapic_phys], ecx
+    mov edx, [esi + 40]
+    mov edi, esi
+    add edi, 44
+    mov eax, [esi + 4]
+    sub eax, 44
+    or dword [acpi_info_flags], ACPI_FLAG_HAS_MADT
+.madt_loop:
+    cmp eax, 0
+    jle .out
+    mov bl, [edi]
+    mov bh, [edi + 1]
+    movzx ecx, bh
+    cmp ecx, 2
+    jb .advance
+    cmp bl, 0
+    je smp_handle_lapic
+    cmp bl, 1
+    je smp_handle_ioapic
+    cmp bl, 2
+    je smp_handle_iso
+    cmp bl, 4
+    je smp_handle_nmi
+    jmp .advance
+.advance:
+    movzx ecx, bh
+    add edi, ecx
+    sub eax, ecx
+    jmp .madt_loop
+.out:
+    popad
+    ret
+
+smp_handle_lapic:
+    pushad
+    mov bl, [edi + 2]
+    mov bh, [edi + 3]
+    test bh, 1
+    jz .done
+    movzx eax, bl
+    call smp_register_cpu
+.done:
+    popad
+    jmp smp_parse_madt.advance
+
+smp_handle_ioapic:
+    pushad
+    ; currently ignored
+    popad
+    jmp smp_parse_madt.advance
+
+smp_handle_iso:
+    jmp smp_parse_madt.advance
+smp_handle_nmi:
+    jmp smp_parse_madt.advance
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
@@ -868,6 +1153,16 @@ acpi_reserved_pad:   db 0
 acpi_rsdp_cache:     times ACPI_RSDP_COPY_LEN db 0
 rsdp_signature:      db "RSD PTR ", 0
 
+acpi_table_buffer:   times ACPI_TABLE_BUFFER_SIZE db 0
+
+cpu_info_signature:  dd 0
+cpu_info_count:      dd 0
+cpu_apic_id_bmp_low: dd 0
+cpu_apic_id_bmp_high:dd 0
+cpu_bsp_lapic_id:    dd 0
+cpu_lapic_phys:      dd 0
+cpu_entries:
+    times (NOVA_CPU_MAX_ENTRIES * 4) dd 0
 firmware_kind:       db FIRMWARE_KIND_BIOS
 firmware_boot_drive: db 0
 firmware_flags:      dw 0
@@ -1017,6 +1312,7 @@ firmware_install_uefi:
     test rax, rax
     je .done
     mov word [acpi_rsdp_cache_len], 0
-    or dword [acpi_info_flags], ACPI_FLAG_FOUND | ACPI_FLAG_FROM_UEFI
+    or dword [acpi_info_flags], ACPI_FLAG_FOUND
+    or dword [acpi_info_flags], ACPI_FLAG_FROM_UEFI
 .done:
     ret
