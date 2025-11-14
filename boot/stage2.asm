@@ -10,8 +10,9 @@
 %define STAGE2_LINEAR_BASE STAGE2_PHYS_BASE
 
 %define GDT_BASE         0x0500
-%define CODE_SELECTOR    0x08
+%define CODE32_SELECTOR  0x08
 %define DATA_SELECTOR    0x10
+%define CODE64_SELECTOR  0x18
 
 %define LOW_IDENTITY_SIZE 0x00200000
 %define KERNEL_PHYS_BASE  0x00200000
@@ -20,6 +21,7 @@
 %define BOOT_PHYS_BASE    STAGE2_PHYS_BASE
 %define BOOT_VIRT_BASE    0xFFFFFFFF80200000
 %define BOOT_MAP_SIZE     0x00020000
+%define LONG_MODE_STACK   (BOOT_VIRT_BASE + BOOT_MAP_SIZE - 0x10)
 
 %define PAGE_SIZE         0x1000
 %define PAGE_FLAG_PRESENT 0x001
@@ -39,6 +41,11 @@
 %assign IDENTITY_PAGE_COUNT (LOW_IDENTITY_SIZE / PAGE_SIZE)
 %assign KERNEL_PAGE_COUNT   (KERNEL_MAP_SIZE / PAGE_SIZE)
 %assign BOOT_PAGE_COUNT     (BOOT_MAP_SIZE / PAGE_SIZE)
+
+%define MSR_EFER        0xC0000080
+%define EFER_LME        (1 << 8)
+%define CR4_PAE         (1 << 5)
+%define CR0_PG          0x80000000
 
 stage2_entry:
     cli
@@ -72,7 +79,7 @@ stage2_entry:
     or eax, 0x1
     mov cr0, eax
 
-    jmp CODE_SELECTOR:protected_mode_entry
+    jmp CODE32_SELECTOR:protected_mode_entry
 
 print_string:
     push ax
@@ -121,7 +128,8 @@ protected_mode_entry:
     jmp .pm_print
 
 .pm_done:
-    cli
+    call enter_long_mode
+
 .pm_hang:
     hlt
     jmp .pm_hang
@@ -233,10 +241,29 @@ setup_paging:
     popad
     ret
 
+enter_long_mode:
+    mov eax, [paging_context]
+    mov cr3, eax
+
+    mov eax, cr4
+    or eax, CR4_PAE
+    mov cr4, eax
+
+    mov ecx, MSR_EFER
+    rdmsr
+    or eax, EFER_LME
+    wrmsr
+
+    mov eax, cr0
+    or eax, CR0_PG
+    mov cr0, eax
+
+    jmp CODE64_SELECTOR:STAGE2_LINEAR_BASE + long_mode_entry
+
 [bits 16]
 
 stage2_real_mode_msg: db "Stage 2: preparing protected mode...", 0x0D, 0x0A, 0
-pmode_message:        db "NovaOS entered protected mode; paging tables ready.", 0
+pmode_message:        db "Paging tables ready; entering long mode...", 0
 
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
@@ -244,8 +271,9 @@ gdt_descriptor:
 
 gdt_start:
     dq 0x0000000000000000          ; Null descriptor
-    dq 0x00CF9A000000FFFF          ; Code segment: base 0, limit 4 GiB
-    dq 0x00CF92000000FFFF          ; Data segment: base 0, limit 4 GiB
+    dq 0x00CF9A000000FFFF          ; 32-bit code segment
+    dq 0x00CF92000000FFFF          ; Data segment
+    dq 0x00AF9A000000FFFF          ; 64-bit code segment
 gdt_end:
 
 align 4096
@@ -262,3 +290,54 @@ page_tables_end:
 
 paging_context:
     dq 0
+
+[bits 64]
+long_mode_entry:
+    mov ax, DATA_SELECTOR
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    mov rsp, LONG_MODE_STACK
+
+    mov ax, cs
+    cmp ax, CODE64_SELECTOR
+    jne long_mode_fail
+
+    mov ax, ss
+    cmp ax, DATA_SELECTOR
+    jne long_mode_fail
+
+    mov rax, rsp
+    cmp rax, LONG_MODE_STACK
+    jne long_mode_fail
+
+    lea rsi, [rel long_mode_success]
+    jmp long_mode_print
+
+long_mode_fail:
+    lea rsi, [rel long_mode_error]
+
+long_mode_print:
+    mov rdi, 0x00000000000B8000
+    mov bl, 0x0A
+
+.lm_print_loop:
+    lodsb
+    test al, al
+    jz .lm_print_done
+    mov ah, bl
+    mov [rdi], ax
+    add rdi, 2
+    jmp .lm_print_loop
+
+.lm_print_done:
+    cli
+.lm_halt:
+    hlt
+    jmp .lm_halt
+
+long_mode_success: db "NovaOS long mode active (CS=0x18, SS=0x10, stack ok).", 0
+long_mode_error:   db "Long mode validation failed!", 0
